@@ -3,9 +3,145 @@ import geopandas as gpd
 import zipfile
 import os
 import rasterio
+import tkinter as tk
 from rasterio.mask import mask
 from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject, Resampling
+from tkinter import filedialog, ttk
+
+
+
+# Function to fetch features overlapping with a given shapefile
+def get_products(shp_path):
+    
+    gdf_feature_class = gpd.read_file(shp_path)
+    
+    # Convert geometry to JSON format
+    bounds = gdf_feature_class.bounds.iloc[0]
+    minx = bounds['minx']
+    miny = bounds['miny']
+    maxx = bounds['maxx']
+    maxy = bounds['maxy']
+
+    # Construct the URL for querying overlapping features
+    arcgis_url = 'https://services1.arcgis.com/99lidPhWCzftIe9K/ArcGIS/rest/services/LiDAR_Extents/FeatureServer/0'
+    
+    query_url = f"{arcgis_url}/query"
+
+    # Parameters for the query
+    params = {
+        'geometryType': 'esriGeometryEnvelope',  # Changed to envelope for bounds
+        'inSR': gdf_feature_class.crs.to_epsg(),  # Assuming CRS has EPSG code
+        'spatialRel': 'esriSpatialRelIntersects',
+        'geometry': f'{minx},{miny},{maxx},{maxy}',
+        'outFields': 'FTP_Path,Tile_Index,Product',
+        'returnGeometry': False,
+        'f': 'json'  # Response format
+    }
+
+    # Make the request
+    response = requests.get(query_url, params=params)
+    response.raise_for_status()
+
+    data = response.json()
+    features = data.get('features', [])
+    list_of_paths = [feature['attributes']['Tile_Index'] for feature in features]
+    return list_of_paths
+
+
+def get_gis_parameters():
+    def browse_file(entry, filetypes):
+        filepath = filedialog.askopenfilename(filetypes=filetypes)
+        if filepath:
+            entry.delete(0, tk.END)
+            entry.insert(0, filepath)
+            if entry == feature_entry:
+                update_dem_types(filepath)
+
+    def browse_folder(entry):
+        folderpath = filedialog.askdirectory()
+        if folderpath:
+            entry.delete(0, tk.END)
+            entry.insert(0, folderpath)
+
+    def update_dem_types(shapefile_path):
+        if shapefile_path:
+            dem_options = get_products(shapefile_path)
+            dem_type_listbox.delete(0, tk.END)
+            for option in dem_options:
+                dem_type_listbox.insert(tk.END, option)
+
+    def submit():
+        nonlocal parameters
+        selected_indices = dem_type_listbox.curselection()
+        selected_dem_types = [dem_type_listbox.get(i) for i in selected_indices]
+
+        parameters = {
+            'feature': feature_var.get(),
+            'save_filetype': save_filetype_var.get(),
+            'output_folder': output_folder_var.get(),
+            'downloads_folder': downloads_folder_var.get(),
+            'units': units_var.get(),
+            'products': selected_dem_types,
+            'sr': sr_var.get()
+        }
+        root.quit()
+
+    root = tk.Tk()
+    root.title("GIS Parameter Selection")
+    root.geometry("500x500")
+    root.configure(bg='lightgray')
+
+    frame = ttk.Frame(root, padding=10)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    def create_input_row(label_text, text_variable=None, browse_command=None, values=None, default_value=None):
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=2)
+        ttk.Label(row, text=label_text, width=20).pack(side=tk.LEFT)
+        if values:
+            entry = ttk.Combobox(row, textvariable=text_variable, values=values)
+            entry.current(0)
+        else:
+            entry = ttk.Entry(row, textvariable=text_variable, width=40)
+            if default_value is not None:
+                text_variable.set(default_value)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        if browse_command:
+            ttk.Button(row, text="Browse", command=lambda e=entry: browse_command(e)).pack(side=tk.RIGHT)
+        return entry
+    
+    feature_var = tk.StringVar()
+    feature_entry = create_input_row("Feature (Shapefile):", feature_var, lambda e: browse_file(e, [("Shapefiles", "*.shp")]))
+    
+    save_filetype_var = tk.StringVar()
+    create_input_row("Save Filetype:", save_filetype_var, values=['.tif', '.jpg', '.png'])
+    
+    output_folder_var = tk.StringVar()
+    create_input_row("Save Folder:", output_folder_var, browse_folder)
+    
+    downloads_folder_var = tk.StringVar()
+    create_input_row("Downloads Folder:", downloads_folder_var, browse_folder)
+    
+    units_var = tk.StringVar()
+    create_input_row("Units:", units_var, values=['Feet', 'Meters'])
+    
+    sr_var = tk.StringVar()
+    create_input_row("Coordinate System (EPSG Number):", sr_var, default_value="3566")
+
+
+    ttk.Label(frame, text="Products:").pack(anchor=tk.W)
+    dem_type_listbox = tk.Listbox(frame, selectmode=tk.MULTIPLE, height=5, exportselection=0)
+    dem_type_listbox.pack(fill=tk.X)
+
+    ttk.Button(frame, text="Submit", command=submit).pack(pady=10)
+
+    parameters = None
+
+    root.mainloop()
+    root.destroy()
+
+    return parameters
 
 
 def reproject_raster(masked_filepath, crs, output_dataset, units):
@@ -157,7 +293,7 @@ def get_layer_id(mapserv_url, layer_name):
 def get_intersecting_tiles(mask_gdf, tile_index_url, tile_group):    
     layer_id = get_layer_id(tile_index_url, tile_group)
     
-    tile_index_url = os.path.join(tile_index_url, str(layer_id), 'query')
+    tile_index_url = f'{tile_index_url}{str(layer_id)}/query'
 
     # Define the parameters for the query
     params = {
@@ -181,6 +317,7 @@ def get_intersecting_tiles(mask_gdf, tile_index_url, tile_group):
         tile_index.set_crs(epsg=tile_json['crs']['properties']['name'].replace('EPSG:',''), inplace=True)
     else:
         print(f"Error: Unable to retrieve data. HTTP Status Code: {response.status_code}")
+        exit()
     
     # Ensure both GeoDataFrames use the same coordinate reference system (CRS)
     if mask_gdf.crs != tile_index.crs:
@@ -202,38 +339,6 @@ def get_intersecting_tiles(mask_gdf, tile_index_url, tile_group):
     return intersecting_tiles
 
 
-# Function to fetch features overlapping with a given shapefile
-def get_products(gdf_feature_class, arcgis_url, dem_type):
-    # Convert geometry to JSON format
-    bounds = gdf_feature_class.bounds.iloc[0]
-    minx = bounds['minx']
-    miny = bounds['miny']
-    maxx = bounds['maxx']
-    maxy = bounds['maxy']
-
-    # Construct the URL for querying overlapping features
-    query_url = f"{arcgis_url}/query"
-
-    # Parameters for the query
-    params = {
-        'geometryType': 'esriGeometryEnvelope',  # Changed to envelope for bounds
-        'inSR': gdf_feature_class.crs.to_epsg(),  # Assuming CRS has EPSG code
-        'spatialRel': 'esriSpatialRelIntersects',
-        'geometry': f'{minx},{miny},{maxx},{maxy}',
-        'outFields': 'FTP_Path,Tile_Index,Product',
-        'returnGeometry': False,
-        'f': 'json'  # Response format
-    }
-
-    # Make the request
-    response = requests.get(query_url, params=params)
-    response.raise_for_status()
-
-    data = response.json()
-    features = data.get('features', [])
-    list_of_paths = [feature['attributes']['Tile_Index'] for feature in features if feature['attributes']['Product'] == dem_type]
-
-    return list_of_paths
 
 # Example usage
 if __name__ == "__main__":
@@ -241,36 +346,25 @@ if __name__ == "__main__":
     # URL of the ArcGIS REST service
     url = 'https://services1.arcgis.com/99lidPhWCzftIe9K/ArcGIS/rest/services/LiDAR_Extents/FeatureServer/0'
     tile_index_url = 'https://mapserv.utah.gov/arcgis/rest/services/Raster/MapServer/'
-
+    
+    # Example usage:
+    params = get_gis_parameters()
+    print(params)
+    
     # Parameters
-    feature = '/Users/jonjones/Sites/GIS/Mask.shp'
-    save_filetype = '.img'
-    output_folder = '/Users/jonjones/Sites/GIS/Final'
-    downloads_folder = '/Users/jonjones/Sites/GIS/Downloads'
-    units = 'Feet'
-    dem_type = 'Bare Earth DEM'
-    sr = 'EPSG: 3566'
-    
-    gdb_path = ''
-    
-    if save_filetype =='ESRI Grid':
-        save_filetype = ''
-    
-    
-    if '.shp' in feature:
-        # Load shapefile using geopandas
-        mask_gdf = gpd.read_file(feature)
-    else:
-        mask_gdf = gpd.read_file(f'{gdb_path}', layer=feature)
-    
-    # Fetch overlapping features
-    products = get_products(mask_gdf, url, dem_type)
-    
-    print(f'{len(products)} datasets found.')
+    feature = params['feature']
+    save_filetype = params['save_filetype']
+    output_folder = params['output_folder']
+    downloads_folder = params['downloads_folder']
+    units = params['units']
+    products = params['products']
+    sr = f"EPSG:{params['sr']}"
     
     for dataset in products:
         print(f'Downloading {dataset}...')
         output_filename = dataset
+        
+        mask_gdf = gpd.read_file(feature)
         
         final_filepath = os.path.join(output_folder, f'{output_filename}{save_filetype}')
         mosaic_filepath = os.path.join(output_folder, f'{output_filename}_mosaic{save_filetype}')
