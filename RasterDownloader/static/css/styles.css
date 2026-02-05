@@ -1,10 +1,22 @@
-
 /* Basic reset */
-* { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
 
 /* App layout */
-#app { display: flex; height: 100vh; width: 100vw; overflow: hidden; }
+#app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
 
 .sidebar {
   width: 280px;
@@ -17,9 +29,19 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   border-right: 1px solid #1f2937;
 }
 
-.brand { font-weight: 700; font-size: 1.25rem; letter-spacing: 0.3px; margin-bottom: 8px; }
+.brand {
+  font-weight: 700;
+  font-size: 1.25rem;
+  letter-spacing: 0.3px;
+  margin-bottom: 8px;
+}
 
-.menu { display: flex; flex-direction: column; gap: 8px; }
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .menu-btn {
   padding: 10px 12px;
   background: #1f2937;
@@ -30,12 +52,24 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   text-align: left;
   transition: all 120ms ease-in-out;
 }
-.menu-btn:hover { background: #374151; }
-.menu-btn:active { transform: translateY(1px); }
 
-.footer { margin-top: auto; opacity: 0.7; }
+.menu-btn:hover {
+  background: #374151;
+}
 
-.content { flex: 1; position: relative; }
+.menu-btn:active {
+  transform: translateY(1px);
+}
+
+.footer {
+  margin-top: auto;
+  opacity: 0.7;
+}
+
+.content {
+  flex: 1;
+  position: relative;
+}
 
 .dataset {
   width: 100%;
@@ -52,13 +86,22 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
   cursor: pointer;
 }
 
+.dataset.selected {
+  background-color: #2f7ef5;
+  border-color: #2f7ef5;
+  color: white;
+}
+
 .dataset p {
   margin: 0 1em 0 1em;
   padding: 0;
   font-size: 0.875rem;
 }
 
-#map { position: absolute; inset: 0; }
+#map {
+  position: absolute;
+  inset: 0;
+}
 
 #dataset-list {
   margin-top: 12px;
@@ -74,20 +117,50 @@ html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Seg
 }
 
 #stitch-toggle {
-  margin-top: 12px;
-  padding: 8px;
-  background: #1f2937;
-  border: 1px solid #374151;
-  border-radius: 8px;
-  font-size: 0.875rem;
-  text-align: center;
-  cursor: pointer;
+  position: relative;
+}
+
+/* Status badge for ACTIVE (✓) */
+#stitch-toggle.selected::after {
+  content: "✓";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  font-weight: 900;
+  color: #0b2e4b;
+  background: #a5d8ff;
+  border: 2px solid #0b2e4b;
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 }
 
 /* Responsive: collapse sidebar on small screens */
 @media (max-width: 700px) {
-  .sidebar { width: 64px; padding: 12px; }
-  .brand { display: none; }
-  .menu-btn { text-indent: -9999px; height: 40px; position: relative; }
-  .menu-btn::after { content: '•'; text-indent: 0; position: absolute; left: 12px; }
+  .sidebar {
+    width: 64px;
+    padding: 12px;
+  }
+
+  .brand {
+    display: none;
+  }
+
+  .menu-btn {
+    text-indent: -9999px;
+    height: 40px;
+    position: relative;
+  }
+
+  .menu-btn::after {
+    content: '•';
+    text-indent: 0;
+    position: absolute;
+    left: 12px;
+  }
 }

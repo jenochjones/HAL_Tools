@@ -1,25 +1,95 @@
-import addDataset from './helpers.js';
+import { renderLidarLayer, filterLidarByUploadedAOI } from './helpers.js';
+
+const DEFAULT_STYLE = {
+  color: '#0066cc',
+  weight: 1.5,
+  opacity: 1,
+  fillColor: '#66b2ff',
+  fillOpacity: 0.2
+};
+
+const HIGHLIGHT_STYLE = {
+  color: '#ff8800',
+  weight: 4,
+  opacity: 1,
+  fillColor: '#ffd08a',
+  fillOpacity: 0.55
+};
+
+let lidarAllGeojson = null;
+
+// Shared state between modules
+const state = {
+  featureIndex: new Map(),
+  lidarLayer: null
+};
+
+let currentlyHighlighted = new Set();
+
+function clearHighlight() {
+  if (currentlyHighlighted.size === 0) return;
+
+  for (const lyr of currentlyHighlighted) {
+    lyr.setStyle?.(DEFAULT_STYLE);
+  }
+
+  currentlyHighlighted.clear();
+}
+
+function highlightSelected() {
+  const datasets = document.getElementsByClassName("dataset selected");
+  const highlightedIds = Array.from(datasets).map(d => String(d.dataset.id));
+
+  if (highlightedIds.length === 0) {
+    clearHighlight();
+    return;
+  }
+
+  clearHighlight();
+
+  let combinedBounds = null;
+  let lastLayer = null;
+
+  for (const hid of highlightedIds) {
+    const lyr = state.featureIndex.get(hid);
+    if (!lyr) continue;
+
+    lyr.setStyle?.(HIGHLIGHT_STYLE);
+    lyr.bringToFront?.();
+
+    currentlyHighlighted.add(lyr);
+    lastLayer = lyr;
+
+    const b = lyr.getBounds?.();
+    if (b?.isValid?.() && b.isValid()) {
+      combinedBounds = combinedBounds ? combinedBounds.extend(b) : b;
+    }
+  }
+
+  if (combinedBounds?.isValid?.() && combinedBounds.isValid()) {
+    map.fitBounds(combinedBounds, { padding: [30, 30], maxZoom: 14 });
+    return;
+  }
+
+  const ll = lastLayer?.getLatLng?.();
+  if (ll) map.setView(ll, Math.max(map.getZoom(), 12));
+}
 
 // Initialize map
-const map = L.map('map', {
-  zoomControl: false, // we'll place it custom
-}).setView(MAP_CENTER, MAP_ZOOM);
+const map = L.map('map', { zoomControl: false }).setView(MAP_CENTER, MAP_ZOOM);
 
-// Add a tile layer (OpenStreetMap)
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
 
-
-
-// Build a GeoJSON query URL. Adjust fields/where/geometry if needed.
+// Load LiDAR extents
 const base = 'https://services1.arcgis.com/99lidPhWCzftIe9K/ArcGIS/rest/services/LiDAR_Extents/FeatureServer/0/query';
 const params = new URLSearchParams({
   where: '1=1',
   outFields: '*',
   returnGeometry: 'true',
-  f: 'geojson' // <-- ask for GeoJSON directly
+  f: 'geojson'
 });
 const url = `${base}?${params.toString()}`;
 
@@ -29,60 +99,26 @@ fetch(url)
     return resp.json();
   })
   .then(geojson => {
-    const layer = L.geoJSON(geojson, {
-      style: {
-        color: '#0066cc',
-        weight: 1.5,
-        opacity: 1,
-        fillColor: '#66b2ff',
-        fillOpacity: 0.2
-      },
-      onEachFeature: (feature, lyr) => {
-        const p = feature.properties || {};
-        const category = p.Category || 'Not Listed';
-        const description = p.Description || 'Not Listed';
-        const hacc = p.Horizontal_Accuracy || 'Not Listed';
-        const vacc = p.Vertical_Accuracy || 'Not Listed';
-        const year = p.Year_Collected || 'Not Listed';
-        const metadata = p.FTP_Path + p.METADATA || 'Not Listed';
-        
-        lyr.bindPopup(`
-            <div style="min-width:200px; width:auto;">
-              <strong>${category}</strong><br/>
-              ${description ? `Description: ${description}<br/>` : ''}
-              ${year ? `Year: ${year}<br/>` : ''}
-              ${hacc ? `Horizontal Accuracy: ${hacc}<br/>` : ''}
-              ${vacc ? `Vertical Accuracy: ${vacc}<br/>` : ''}
-              ${metadata ? `<a href="${metadata}" target="_blank">Metadata</a>` : ''}
-            </div>
-          `);
-        
-        addDataset(category, p.OBJECTID)
-      }
-    }).addTo(map);
-
+    lidarAllGeojson = geojson;
+    renderLidarLayer(lidarAllGeojson, map, state);
   })
   .catch(err => {
     console.error('Failed to load GeoJSON:', err);
     alert('Could not load GeoJSON from the service (check CORS/format/token).');
   });
 
-// Add zoom control to top-right for a clean look
 L.control.zoom({ position: 'topright' }).addTo(map);
 
-// Actions
-const btnLoadShp = document.getElementById('btn-load-shp');
-
-// A layer group to hold server-uploaded data (if you don't have one already)
+// Shapefile upload group
 const serverUploadedGroup = window.serverUploadedGroup || L.layerGroup().addTo(map);
+
 function styleFor(feature) {
-  const geom = (feature?.geometry?.type) || '';
+  const geom = feature?.geometry?.type || '';
   if (geom.includes('Line')) return { color: '#2563eb', weight: 3 };
   if (geom.includes('Polygon')) return { color: '#ef4444', weight: 2, fillColor: '#fca5a5', fillOpacity: 0.35 };
-  return { color: '#10b981' }; // points
+  return { color: '#10b981' };
 }
 
-// --- Four-part Shapefile upload wiring ---
 const btnLoadShp4 = document.getElementById('btn-load-shp-4');
 const shp4Input = document.getElementById('shp-4-input');
 
@@ -93,21 +129,18 @@ shp4Input?.addEventListener('change', async (e) => {
   if (files.length === 0) return;
 
   try {
-    // Categorize by extension
     const parts = { shp: null, shx: null, dbf: null, prj: null };
     for (const f of files) {
       const ext = f.name.split('.').pop().toLowerCase();
       if (ext in parts && !parts[ext]) parts[ext] = f;
     }
 
-    // Validate presence of all 4
     if (!parts.shp || !parts.shx || !parts.dbf || !parts.prj) {
       alert('Please select exactly one each: .shp, .shx, .dbf, and .prj (same basename).');
       e.target.value = '';
       return;
     }
 
-    // Validate same basename (case-insensitive)
     const stem = (name) => name.replace(/\.[^.]+$/, '').toLowerCase();
     const s = stem(parts.shp.name);
     if (![parts.shx, parts.dbf, parts.prj].every(f => stem(f.name) === s)) {
@@ -116,19 +149,15 @@ shp4Input?.addEventListener('change', async (e) => {
       return;
     }
 
-    // Build FormData (use specific field names)
     const form = new FormData();
     form.append('shp', parts.shp, parts.shp.name);
     form.append('shx', parts.shx, parts.shx.name);
     form.append('dbf', parts.dbf, parts.dbf.name);
     form.append('prj', parts.prj, parts.prj.name);
 
-    // POST to Flask
     const res = await fetch('/upload_shapefile_parts', { method: 'POST', body: form });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || `Upload failed: ${res.status}`);
-    }
+    if (!res.ok) throw new Error(await res.text() || `Upload failed: ${res.status}`);
+
     const payload = await res.json();
     const { layer, warnings } = payload || {};
 
@@ -139,7 +168,6 @@ shp4Input?.addEventListener('change', async (e) => {
       return;
     }
 
-    // Clear previous (optional)
     serverUploadedGroup.clearLayers();
 
     const layerObj = L.geoJSON(layer.geojson, {
@@ -156,21 +184,28 @@ shp4Input?.addEventListener('change', async (e) => {
       }
     }).addTo(serverUploadedGroup);
 
+    // Filter LiDAR by uploaded AOI
+    filterLidarByUploadedAOI(layer.geojson, lidarAllGeojson, map, state);
+
     const b = layerObj.getBounds?.();
     if (b?.isValid?.() && b.isValid()) {
       map.fitBounds(b, { padding: [20, 20] });
-    } else {
-      alert('Uploaded features added, but bounds could not be determined.');
     }
   } catch (err) {
     console.error(err);
     alert(`Upload failed: ${err.message}`);
   } finally {
-    // Allow same-file reselect
     e.target.value = '';
   }
 });
 
+document.getElementById('stitch-toggle')?.addEventListener('click', (e) => {
+  e.currentTarget.classList.toggle('selected');
+});
 
-// Resize map if container size changes (safety)
-window.addEventListener('resize', () => { map.invalidateSize(); });
+// Dataset selection => highlight
+window.addEventListener("dataset:selected", () => {
+  highlightSelected();
+});
+
+window.addEventListener('resize', () => map.invalidateSize());

@@ -17,10 +17,8 @@
       <nav class="menu">
         <button class="menu-btn" id="btn-load-shp-4">Load Shapefile (.shp, .shx, .dbf, .prj)</button>
         <div id="dataset-list">
-          <div class="dataset"><p>Dataset 1</p></div>
-          <div class="dataset"><p>Dataset 2</p></div>
         </div>
-        <div id="stitch-toggle"></div>
+        <button id="stitch-toggle" class="menu-btn">Stitch Datasets</button>
         <button class="menu-btn" id="btn-download-lidar">Download LiDAR</button>
       </nav>
 
@@ -37,6 +35,8 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
   <script>
     const MAP_CENTER = [{{ center_lat }}, {{ center_lng }}];
