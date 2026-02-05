@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UGRC Raster Data Download</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">Toolbar</div>
+      <nav class="menu">
+        <button class="menu-btn" id="btn-load-shp-4">Load Shapefile (.shp, .shx, .dbf, .prj)</button>
+        <div id="dataset-list">
+          <div class="dataset"><p>Dataset 1</p></div>
+          <div class="dataset"><p>Dataset 2</p></div>
+        </div>
+        <div id="stitch-toggle"></div>
+        <button class="menu-btn" id="btn-download-lidar">Download LiDAR</button>
+      </nav>
+
+      <input type="file" id="shp-4-input" accept=".shp,.shx,.dbf,.prj" multiple style="display:none" />
+
+      <div class="footer">
+        <small>© {{ 2026 }} HAL Engineers</small>
+      </div>
+    </aside>
+    <main class="content">
+      <div id="map"></div>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <script>
+    const MAP_CENTER = [{{ center_lat }}, {{ center_lng }}];
+    const MAP_ZOOM = {{ zoom }};
+  </script>
+  <script src="{{ url_for('static', filename='js/main.js') }}" type="module"></script>
+</body>
+
+</html>
