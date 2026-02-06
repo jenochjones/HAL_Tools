@@ -33,6 +33,7 @@ function renderLidarLayer(geojson, map, state) {
 
   // Create new layer
   state.lidarLayer = L.geoJSON(geojson, {
+    pane: 'lidarPane',
     style: {
       color: '#0066cc',
       weight: 1.5,

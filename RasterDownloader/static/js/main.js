@@ -77,6 +77,12 @@ function highlightSelected() {
 
 // Initialize map
 const map = L.map('map', { zoomControl: false }).setView(MAP_CENTER, MAP_ZOOM);
+// --- Panes (control draw order) ---
+map.createPane('lidarPane');
+map.getPane('lidarPane').style.zIndex = 400;
+
+map.createPane('uploadPane');
+map.getPane('uploadPane').style.zIndex = 650; // always on top
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
@@ -171,6 +177,7 @@ shp4Input?.addEventListener('change', async (e) => {
     serverUploadedGroup.clearLayers();
 
     const layerObj = L.geoJSON(layer.geojson, {
+      pane: 'uploadPane',
       style: styleFor,
       pointToLayer: (feature, latlng) =>
         L.circleMarker(latlng, { radius: 6, ...styleFor(feature) }),
