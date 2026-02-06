@@ -2,6 +2,7 @@ function addDataset(innerText, id) {
   const div = document.createElement("div");
   div.className = "dataset";
   div.dataset.id = id;
+  div.dataset.label = innerText;
 
   const p = document.createElement("p");
   p.textContent = innerText;
@@ -54,7 +55,7 @@ function renderLidarLayer(geojson, map, state) {
       const vacc = p.Vertical_Accuracy || 'Not Listed';
       const year = p.Year_Collected || 'Not Listed';
       const metadata = (p.FTP_Path && p.METADATA) ? (p.FTP_Path + p.METADATA) : null;
-
+      
       lyr.bindPopup(`
         <div style="min-width:200px; width:auto;">
           <strong>${category}</strong><br/>
@@ -66,7 +67,7 @@ function renderLidarLayer(geojson, map, state) {
         </div>
       `);
 
-      addDataset(category, objectId);
+      addDataset(`${category.match(/\{([^}]*)\}/)?.[1]} - ${description}`, objectId);
     }
   }).addTo(map);
 }

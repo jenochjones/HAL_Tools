@@ -18,6 +18,19 @@
         <button class="menu-btn" id="btn-load-shp-4">Load Shapefile (.shp, .shx, .dbf, .prj)</button>
         <div id="dataset-list">
         </div>
+        <div
+          style="display: flex; flex-direction: row; width: 100%; align-items: center; justify-content: space-between;">
+          <label for="out-crs">Output CRS:</label>
+          <input id="out-crs" class="menu-inpt" placeholder="EPSG Number">
+        </div>
+        <div
+          style="display: flex; flex-direction: row; width: 100%; align-items: center; justify-content: space-between;">
+          <label for="vertical-units">Vertical Units:</label>
+          <select id="vertical-units" class="menu-inpt">
+            <option value="feet">Feet</option>
+            <option value="meters">Meters</option>
+          </select>
+        </div>
         <button id="stitch-toggle" class="menu-btn">Stitch Datasets</button>
         <button class="menu-btn" id="btn-download-lidar">Download LiDAR</button>
       </nav>
@@ -32,6 +45,21 @@
       <div id="map"></div>
     </main>
   </div>
+
+  <!-- Dataset ranking popup (shown when multiple datasets selected) -->
+  <dialog id="rank-dialog" class="rank-dialog" aria-labelledby="rank-title">
+    <form method="dialog" id="rank-form" class="rank-form">
+      <h3 id="rank-title" class="rank-title">Rank Selected Datasets</h3>
+      <p class="rank-subtitle">Drag to reorder (highest priority at top) or use the arrows.</p>
+
+      <ol id="rank-list" class="rank-list" aria-label="Selected datasets ranking list"></ol>
+
+      <div class="rank-actions">
+        <button type="button" id="rank-cancel" class="menu-btn rank-btn-secondary">Cancel</button>
+        <button type="submit" id="rank-confirm" class="menu-btn rank-btn-primary" value="confirm">Confirm Order</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>

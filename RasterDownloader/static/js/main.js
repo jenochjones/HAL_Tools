@@ -17,6 +17,7 @@ const HIGHLIGHT_STYLE = {
 };
 
 let lidarAllGeojson = null;
+let uploadedShapefileGeoJSON = null; // set after shapefile upload
 
 // Shared state between modules
 const state = {
@@ -192,7 +193,8 @@ shp4Input?.addEventListener('change', async (e) => {
     }).addTo(serverUploadedGroup);
 
     // Filter LiDAR by uploaded AOI
-    filterLidarByUploadedAOI(layer.geojson, lidarAllGeojson, map, state);
+    uploadedShapefileGeoJSON = layer.geojson;
+  filterLidarByUploadedAOI(layer.geojson, lidarAllGeojson, map, state);
 
     const b = layerObj.getBounds?.();
     if (b?.isValid?.() && b.isValid()) {
@@ -216,3 +218,221 @@ window.addEventListener("dataset:selected", () => {
 });
 
 window.addEventListener('resize', () => map.invalidateSize());
+
+// ------------------------------
+// Download LiDAR: compile request payload, optionally rank datasets, send to server
+// ------------------------------
+
+function normalizeEpsg(input) {
+  const raw = (input || '').trim();
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  return upper.startsWith('EPSG:') ? upper : `EPSG:${upper.replace(/[^0-9]/g, '') || upper}`;
+}
+
+function getSelectedDatasetObjects() {
+  const selected = document.querySelectorAll('#dataset-list .dataset.selected');
+  return Array.from(selected).map((el) => ({
+    id: String(el.dataset.id),
+    label: (el.dataset.label || el.textContent || '').trim() || String(el.dataset.id)
+  }));
+}
+
+function isStitchSelected() {
+  return document.getElementById('stitch-toggle')?.classList.contains('selected') === true;
+}
+
+function buildRankListItems(listEl, datasetObjs) {
+  listEl.innerHTML = '';
+  datasetObjs.forEach((ds) => {
+    const li = document.createElement('li');
+    li.className = 'rank-item';
+    li.draggable = true;
+    li.dataset.id = ds.id;
+
+    const handle = document.createElement('span');
+    handle.className = 'rank-handle';
+    handle.textContent = '⠿';
+    handle.title = 'Drag to reorder';
+
+    const label = document.createElement('span');
+    label.className = 'rank-label';
+    label.textContent = ds.label;
+
+    const controls = document.createElement('span');
+    controls.className = 'rank-controls';
+
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'rank-arrow';
+    up.textContent = '↑';
+    up.title = 'Move up';
+    up.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const prev = li.previousElementSibling;
+      if (prev) listEl.insertBefore(li, prev);
+    });
+
+    const down = document.createElement('button');
+    down.type = 'button';
+    down.className = 'rank-arrow';
+    down.textContent = '↓';
+    down.title = 'Move down';
+    down.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = li.nextElementSibling;
+      if (next) listEl.insertBefore(next, li);
+    });
+
+    controls.appendChild(up);
+    controls.appendChild(down);
+
+    li.appendChild(handle);
+    li.appendChild(label);
+    li.appendChild(controls);
+    listEl.appendChild(li);
+  });
+
+  // drag and drop ordering
+  let dragging = null;
+  listEl.querySelectorAll('li').forEach((li) => {
+    li.addEventListener('dragstart', (e) => {
+      dragging = li;
+      li.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/html', li.innerHTML);
+    });
+    li.addEventListener('dragend', () => {
+      dragging = null;
+      li.classList.remove('dragging');
+    });
+    li.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (!dragging || dragging === li) return;
+      const rect = li.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      if (before) listEl.insertBefore(dragging, li);
+      else listEl.insertBefore(dragging, li.nextSibling);
+    });
+    li.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+  });
+}
+
+function openRankingDialog(datasetObjs) {
+  const dialog = document.getElementById('rank-dialog');
+  const listEl = document.getElementById('rank-list');
+  const cancelBtn = document.getElementById('rank-cancel');
+  const form = document.getElementById('rank-form');
+
+  // If <dialog> isn't supported, just return current order
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    return Promise.resolve(datasetObjs.map(d => d.id));
+  }
+
+  buildRankListItems(listEl, datasetObjs);
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      cancelBtn?.removeEventListener('click', onCancel);
+      dialog.removeEventListener('cancel', onCancel);
+      form.removeEventListener('submit', onSubmit);
+    };
+
+    const onCancel = () => {
+      cleanup();
+      dialog.close('cancel');
+      reject(new Error('Ranking cancelled'));
+    };
+
+    const onSubmit = (e) => {
+      e.preventDefault();
+      const ranked = Array.from(listEl.querySelectorAll('li')).map(li => li.dataset.id);
+      cleanup();
+      dialog.close('confirm');
+      resolve(ranked);
+    };
+
+    cancelBtn?.addEventListener('click', onCancel);
+    dialog.addEventListener('cancel', onCancel);
+    form.addEventListener('submit', onSubmit);
+
+    dialog.showModal();
+  });
+}
+
+async function sendDownloadRequest(payloadArray) {
+  const res = await fetch('/download_lidar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ data: payloadArray })
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(txt || `Request failed (${res.status})`);
+  }
+  return res.json().catch(() => ({}));
+}
+
+document.getElementById('btn-download-lidar')?.addEventListener('click', async () => {
+  try {
+    if (!uploadedShapefileGeoJSON) {
+      alert('Please load a shapefile AOI first.');
+      return;
+    }
+
+    const selected = getSelectedDatasetObjects();
+    if (selected.length === 0) {
+      alert('Please select at least one dataset.');
+      return;
+    }
+
+    const outCrs = normalizeEpsg(document.getElementById('out-crs')?.value);
+    if (!outCrs || outCrs === 'EPSG:') {
+      alert('Please enter an Output CRS (EPSG code).');
+      return;
+    }
+
+    const stitch = isStitchSelected();
+
+    // Rank if multiple datasets
+    let rankedIds = selected.map(d => d.id);
+    if (selected.length > 1) {
+      rankedIds = await openRankingDialog(selected);
+    }
+
+    // Build array as requested: [uploaded shapefile geojson, selected datasets (ranked), output CRS, stitch toggle]
+    const payload = [uploadedShapefileGeoJSON, rankedIds, outCrs, stitch];
+
+    const btn = document.getElementById('btn-download-lidar');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Processing…';
+    }
+
+    const result = await sendDownloadRequest(payload);
+    console.log('Download request accepted:', result);
+
+    // Backend may respond with a job id or a download URL
+    if (result?.download_url) {
+      window.location.href = result.download_url;
+    } else {
+      alert(result?.message || 'Request submitted. Server is processing.');
+    }
+  } catch (err) {
+    console.error(err);
+    alert(err?.message || 'Download request failed.');
+  } finally {
+    const btn = document.getElementById('btn-download-lidar');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Download LiDAR';
+    }
+  }
+});
