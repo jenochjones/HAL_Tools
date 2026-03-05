@@ -450,6 +450,7 @@ def download_lidar():
     Implements: tile query -> download/extract -> mosaic -> clip -> reproject -> optional stitch.
     Returns a ZIP containing resulting GeoTIFF(s).
     """
+    print("Received request for /download_lidar")  # Debug log
     data = request.get_json(silent=True) or {}
     arr = data.get("data")
 
@@ -460,7 +461,7 @@ def download_lidar():
         }), 400
 
     uploaded_geojson, ranked_datasets, output_crs, stitch = arr
-
+    print(f"Parsed input - GeoJSON type: {type(uploaded_geojson)}, Datasets: {ranked_datasets}, Output CRS: {output_crs}, Stitch: {stitch}")  # Debug log
     # ---- validation (same spirit as your stub) ----
     if not uploaded_geojson or not isinstance(uploaded_geojson, (dict, list)):
         return jsonify({"status": "error", "message": "Invalid or missing uploaded GeoJSON."}), 400
@@ -483,9 +484,9 @@ def download_lidar():
     outputs_dir = os.path.join(job_dir, "outputs")
     os.makedirs(downloads_dir, exist_ok=True)
     os.makedirs(outputs_dir, exist_ok=True)
-
+    print(f"Created job workspace at {job_dir}")  # Debug log
     try:
-        # Get file extensions for datasets (like your template)
+        # Get file extensions for datasets
         ext_map = get_dataset_ext(ranked_datasets, LIDAR_EXTENTS_FS0)
 
         produced = []   # per-dataset output tifs
@@ -507,41 +508,42 @@ def download_lidar():
                     "status": "error",
                     "message": f"No intersecting tiles found for dataset '{dataset}'."
                 }), 404
-
+            print(f"Found {len(tiles)} intersecting tiles for dataset '{dataset}'")  # Debug log
             # 2) Download/extract each tile zip
             for path, tile, ext in tiles:
                 # In your template: ftp_url = os.path.join(PATH, f'{TILE}{EXT}')
                 tile_url = os.path.join(path, f"{tile}{ext}")
                 download_and_extract_zip(tile_url, ds_download_dir)
-
+            print(f"Downloaded and extracted tiles for dataset '{dataset}' to {ds_download_dir}")  # Debug log
             # 3) Find extracted rasters
             raster_paths = glob(os.path.join(ds_download_dir, f"*{file_ext}"))
             if not raster_paths:
                 # also try tif if ext mismatched
                 raster_paths = glob(os.path.join(ds_download_dir, "*.tif")) + glob(os.path.join(ds_download_dir, "*.tiff"))
-
+            
             if not raster_paths:
                 return jsonify({
                     "status": "error",
                     "message": f"No rasters found after download for dataset '{dataset}'."
                 }), 500
-
+            print(f"Found {len(raster_paths)} raster files for dataset '{dataset}' after extraction")  # Debug log
             # 4) Mosaic
             mosaic_arr, mosaic_transform, mosaic_crs, mosaic_meta = mosaic_rasters_to_array(raster_paths)
-
+            print(f"Mosaicked rasters for dataset '{dataset}' into array with shape {mosaic_arr.shape} and CRS {mosaic_crs}")  # Debug log
             # 5) Clip to polygon mask
             clipped_arr, clipped_transform, clipped_meta = clip_array_with_geojson(
                 mosaic_arr, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms
             )
             clipped_meta.update({"crs": mosaic_crs, "transform": clipped_transform})
-
+            print(f"Clipped mosaic for dataset '{dataset}' to geometry, resulting in array with shape {clipped_arr.shape}")  # Debug log
             # 6) Reproject to requested output CRS
             reproj_arr, reproj_meta = reproject_to_crs(clipped_arr, clipped_meta, output_crs)
-
+            print(f"Reprojected clipped raster for dataset '{dataset}' to {output_crs}, resulting in array with shape {reproj_arr.shape} and CRS {reproj_meta['crs']}")  # Debug log
             # 7) Write dataset output GeoTIFF
             out_tif = os.path.join(outputs_dir, f"{ds_name}.tif")
             write_geotiff(out_tif, reproj_arr, reproj_meta)
             produced.append(out_tif)
+            print(f"Wrote output GeoTIFF for dataset '{dataset}' to {out_tif}")  # Debug log
 
         # Optional stitch across datasets
         final_outputs = produced
@@ -551,7 +553,8 @@ def download_lidar():
             stitched_path = os.path.join(outputs_dir, "Stitched_DEMs.tif")
             write_geotiff(stitched_path, stitched_arr, stitched_meta)
             final_outputs = [stitched_path]
-
+            print(f"Stitched {len(produced)} datasets into single GeoTIFF at {stitched_path}")  # Debug log
+        
         # Zip and return
         zip_path = os.path.join(job_dir, "lidar_outputs.zip")
         zip_outputs(final_outputs, zip_path)
