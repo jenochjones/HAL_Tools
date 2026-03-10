@@ -1,8 +1,9 @@
-function addDataset(innerText, id) {
+function addDataset(innerText, id, index) {
   const div = document.createElement("div");
   div.className = "dataset";
   div.dataset.id = id;
   div.dataset.label = innerText;
+  div.dataset.index = index;
 
   const p = document.createElement("p");
   p.textContent = innerText;
@@ -12,8 +13,9 @@ function addDataset(innerText, id) {
     div.classList.toggle("selected");
 
     window.dispatchEvent(new CustomEvent("dataset:selected", {
-      detail: { id }
+      detail: { index: div.dataset.index }
     }));
+
   });
 
   const container = document.getElementById("dataset-list");
@@ -54,12 +56,14 @@ function renderLidarLayer(geojson, map, state) {
       const hacc = p.Horizontal_Accuracy || 'Not Listed';
       const vacc = p.Vertical_Accuracy || 'Not Listed';
       const year = p.Year_Collected || 'Not Listed';
+      const tIndex = p.Tile_Index || 'Not Listed';
       const metadata = (p.FTP_Path && p.METADATA) ? (p.FTP_Path + p.METADATA) : null;
-      
+
       lyr.bindPopup(`
         <div style="min-width:200px; width:auto;">
           <strong>${category}</strong><br/>
           ${description ? `Description: ${description}<br/>` : ''}
+          ${tIndex ? `Tile Index: ${tIndex}<br/>` : ''}
           ${year ? `Year: ${year}<br/>` : ''}
           ${hacc ? `Horizontal Accuracy: ${hacc}<br/>` : ''}
           ${vacc ? `Vertical Accuracy: ${vacc}<br/>` : ''}
@@ -67,7 +71,7 @@ function renderLidarLayer(geojson, map, state) {
         </div>
       `);
 
-      addDataset(`${category.match(/\{([^}]*)\}/)?.[1]} - ${description}`, objectId);
+      addDataset(`${category.match(/\{([^}]*)\}/)?.[1]} - ${description}`, objectId, tIndex);
     }
   }).addTo(map);
 }
@@ -118,7 +122,7 @@ function filterLidarByUploadedAOI(uploadedGeojson, lidarAllGeojson, map, state) 
     const tmp = L.geoJSON(filtered);
     const b = tmp.getBounds();
     if (b.isValid()) map.fitBounds(b, { padding: [20, 20] });
-  } catch {}
+  } catch { }
 }
 
 export { addDataset, renderLidarLayer, filterLidarByUploadedAOI };

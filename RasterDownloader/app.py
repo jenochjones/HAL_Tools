@@ -1,5 +1,4 @@
 import geopandas as gpd
-
 import os
 import re
 import json
@@ -7,49 +6,53 @@ import uuid
 import shutil
 import zipfile
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 from urllib.parse import urljoin
-
 import requests
-from flask import Flask, request, render_template, jsonify, send_file
+from flask import Flask, request, render_template, jsonify, send_file, abort
 from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
-
 import rasterio
 from rasterio.merge import merge as rio_merge
 from rasterio.mask import mask as rio_mask
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_geom
 from rasterio.io import MemoryFile
-
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
 from pyproj import CRS
 
 # --- Create the app ONCE ---
 app = Flask(__name__)
-
-# Limit upload size to 20 MB (adjust as needed)
 app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20 MB
 
-
-
-# ---- Config (same services as your template) ----
+# ---- Config ----
 LIDAR_EXTENTS_FS0 = "https://services1.arcgis.com/99lidPhWCzftIe9K/ArcGIS/rest/services/LiDAR_Extents/FeatureServer/0"
-TILE_INDEX_MAPSERVER = "https://mapserv.utah.gov/arcgis/rest/services/Raster/MapServer/"
+TILE_INDEX_MAPSERVER = "https://services1.arcgis.com/99lidPhWCzftIe9K/arcgis/rest/services/Lidar/FeatureServer/0"
 
-# Where to build temp jobs (use a persistent path if you want to keep results)
+# Where to build temp jobs (use persistent path if you want to keep results)
 BASE_WORK_DIR = os.environ.get("LIDAR_WORKDIR", tempfile.gettempdir())
 
+# ----------------------------
+# JOB SYSTEM
+# ----------------------------
+JOBS = {}          # job_id -> dict
+JOBS_LOCK = threading.Lock()
+EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
-# ----------------------------
-# Helpers (template-inspired)
-# ----------------------------
+class JobCancelled(Exception):
+    pass
+
+def now_epoch():
+    return int(time.time())
+
 def safe_name(text: str) -> str:
     """Filesystem-safe name."""
     text = str(text or "").strip()
     text = re.sub(r"[^A-Za-z0-9_\-]+", "_", text)
     return text[:120] or "dataset"
-
 
 def remove_all_files(folderpath: str) -> None:
     """Remove all files in a folder (not recursive)."""
@@ -58,10 +61,10 @@ def remove_all_files(folderpath: str) -> None:
             if os.path.isfile(f):
                 os.remove(f)
 
-
-def download_and_extract_zip(url: str, save_folder: str) -> None:
+def download_and_extract_zip(url: str, save_folder: str, cancel_event: threading.Event = None) -> None:
     """
     Download a zip from url -> save_folder, extract contents, remove zip.
+    Cancellation-aware: checks cancel_event while downloading.
     """
     os.makedirs(save_folder, exist_ok=True)
     file_name = os.path.basename(url)
@@ -72,59 +75,52 @@ def download_and_extract_zip(url: str, save_folder: str) -> None:
             r.raise_for_status()
             with open(zip_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if cancel_event and cancel_event.is_set():
+                        raise JobCancelled("Job canceled during download.")
                     if chunk:
                         f.write(chunk)
+
+        if cancel_event and cancel_event.is_set():
+            raise JobCancelled("Job canceled before extraction.")
 
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall(save_folder)
 
     finally:
         if os.path.exists(zip_path):
-            os.remove(zip_path)
-
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
 
 def get_layer_id(mapserv_url: str, layer_name: str) -> int | None:
-    """
-    Find a layer id by layer name from an ArcGIS MapServer root endpoint.
-    """
     meta_url = f"{mapserv_url}?f=json"
     resp = requests.get(meta_url, timeout=60)
     if resp.status_code != 200:
         return None
-
     data = resp.json()
     for lyr in data.get("layers", []):
         if lyr.get("name") == layer_name:
             return lyr.get("id")
     return None
 
-
 def parse_geojson_geometry(uploaded_geojson) -> tuple[list[dict], CRS]:
     """
     Convert GeoJSON to (list_of_geojson_geom_dicts, input_crs).
-
-    - Supports FeatureCollection, Feature, geometry dict, or list of features.
-    - CRS handling:
-      * If GeoJSON has a "crs" object, attempt to parse it
-      * Otherwise default to EPSG:4326
+    Defaults to EPSG:4326 when CRS not present.
     """
-    # Default assumption
     input_crs = CRS.from_epsg(4326)
 
-    # Try to read CRS from GeoJSON (non-standard in modern GeoJSON but sometimes present)
     if isinstance(uploaded_geojson, dict):
         crs_obj = uploaded_geojson.get("crs")
         if crs_obj:
             try:
-                # Common patterns:
-                # {"type":"name","properties":{"name":"EPSG:26912"}}
                 name = crs_obj.get("properties", {}).get("name")
                 if name:
                     input_crs = CRS.from_user_input(name)
             except Exception:
                 pass
 
-    # Normalize to features
     geoms = []
     if isinstance(uploaded_geojson, dict) and uploaded_geojson.get("type") == "FeatureCollection":
         feats = uploaded_geojson.get("features", [])
@@ -135,7 +131,6 @@ def parse_geojson_geometry(uploaded_geojson) -> tuple[list[dict], CRS]:
     elif isinstance(uploaded_geojson, dict) and uploaded_geojson.get("type") in ("Polygon", "MultiPolygon"):
         geoms = [uploaded_geojson]
     elif isinstance(uploaded_geojson, list):
-        # list of features/geometries
         for item in uploaded_geojson:
             if isinstance(item, dict) and item.get("type") == "Feature" and item.get("geometry"):
                 geoms.append(item["geometry"])
@@ -147,7 +142,6 @@ def parse_geojson_geometry(uploaded_geojson) -> tuple[list[dict], CRS]:
     if not geoms:
         raise ValueError("No polygon geometry found in uploaded GeoJSON.")
 
-    # Combine into one mask geometry (union)
     shapely_geoms = [shape(g) for g in geoms]
     unioned = unary_union(shapely_geoms)
     if unioned.is_empty:
@@ -155,28 +149,14 @@ def parse_geojson_geometry(uploaded_geojson) -> tuple[list[dict], CRS]:
 
     return [mapping(unioned)], input_crs
 
-
 def get_bbox_from_geom(geom_geojson_list: list[dict]) -> dict:
-    """
-    Returns bbox dict suitable for ArcGIS 'esriGeometryEnvelope' query.
-    """
     geom = shape(geom_geojson_list[0])
     minx, miny, maxx, maxy = geom.bounds
-    return {
-        "xmin": minx,
-        "ymin": miny,
-        "xmax": maxx,
-        "ymax": maxy
-    }
-
+    return {"xmin": minx, "ymin": miny, "xmax": maxx, "ymax": maxy}
 
 def get_dataset_ext(datasets: list[str], url: str) -> dict:
-    """
-    Query LiDAR_Extents FeatureServer/0 for Tile_Index -> File_Extension mapping.
-    """
     query_url = f"{url}/query"
     where = " OR ".join([f"Tile_Index = '{d}'" for d in datasets])
-
     params = {
         "outFields": "Tile_Index,File_Extension",
         "returnGeometry": "false",
@@ -185,7 +165,6 @@ def get_dataset_ext(datasets: list[str], url: str) -> dict:
     }
     resp = requests.get(query_url, params=params, timeout=60)
     resp.raise_for_status()
-
     data = resp.json()
     features = data.get("features", [])
     return {
@@ -194,28 +173,39 @@ def get_dataset_ext(datasets: list[str], url: str) -> dict:
         if f.get("attributes")
     }
 
-
-def get_intersecting_tiles(geom_geojson_list: list[dict], tile_index_url: str, tile_group: str, in_wkid: int = 4326):
-    """
-    Query the tile index layer for tiles intersecting the geometry bbox.
-    Returns list of tuples: (PATH, TILE, EXT).
-    """
-    layer_id = get_layer_id(tile_index_url, tile_group)
-    if layer_id is None:
+def get_intersecting_tiles(
+    geom_geojson_list: list[dict],
+    tile_index_url: str,
+    layer_id: str,
+    in_wkid: int = 4326
+):
+    if not layer_id:
         return []
+    if not geom_geojson_list:
+        raise ValueError("geom_geojson_list is required to compute a bounding box")
 
-    query_url = urljoin(tile_index_url, f"{layer_id}/query")
+    if isinstance(in_wkid, CRS):
+        epsg = in_wkid.to_epsg()
+        in_wkid = int(epsg) if epsg else 4326
+    elif hasattr(in_wkid, "to_epsg"):
+        epsg = in_wkid.to_epsg()
+        in_wkid = int(epsg) if epsg else 4326
+    else:
+        in_wkid = int(in_wkid)
 
     bbox = get_bbox_from_geom(geom_geojson_list)
+    if not all(k in bbox for k in ("xmin", "ymin", "xmax", "ymax")):
+        raise ValueError("Invalid bounding box computed from geometry")
     bbox["spatialReference"] = {"wkid": in_wkid}
 
+    query_url = urljoin(tile_index_url.rstrip("/") + "/", "query")
     params = {
         "f": "json",
-        "where": "1=1",
-        "outFields": "PATH,TILE,EXT",
+        "where": f"TILE_INDEX = '{layer_id}'",
         "geometry": json.dumps(bbox),
         "geometryType": "esriGeometryEnvelope",
         "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "PATH,TILE,EXT",
         "returnGeometry": "false",
         "inSR": in_wkid
     }
@@ -223,8 +213,8 @@ def get_intersecting_tiles(geom_geojson_list: list[dict], tile_index_url: str, t
     resp = requests.get(query_url, params=params, timeout=60)
     if resp.status_code != 200:
         return []
-
     data = resp.json()
+
     tiles = []
     for feat in data.get("features", []):
         attrs = feat.get("attributes") or feat.get("properties")
@@ -232,11 +222,7 @@ def get_intersecting_tiles(geom_geojson_list: list[dict], tile_index_url: str, t
             tiles.append((attrs["PATH"], attrs["TILE"], attrs["EXT"]))
     return tiles
 
-
 def mosaic_rasters_to_array(raster_paths: list[str]):
-    """
-    Mosaics rasters and returns (mosaic_array, mosaic_transform, mosaic_crs, mosaic_meta)
-    """
     srcs = [rasterio.open(p) for p in raster_paths]
     try:
         mosaic, transform = rio_merge(srcs)
@@ -253,19 +239,50 @@ def mosaic_rasters_to_array(raster_paths: list[str]):
             s.close()
 
 
-def clip_array_with_geojson(mosaic_array, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms):
+def clip_array_with_geojson(mosaic_array, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms, mask_crs):
     """
     Clip mosaic by polygon mask using rasterio.mask.
-    Returns (clipped_array, clipped_transform, clipped_meta)
+    Ensures mask_geoms are in the same CRS as the raster.
+    mask_crs: pyproj.CRS or rasterio CRS or EPSG string that describes mask_geoms CRS
     """
-    # Write mosaic to an in-memory dataset to use rasterio.mask cleanly
+    # Normalize CRS to something rasterio understands
+    if mosaic_crs is None:
+        raise ValueError("Raster CRS is None. Cannot clip without a defined raster CRS.")
+
+    # Convert mask_crs to a string for transform_geom
+    if isinstance(mask_crs, CRS):
+        src_crs_str = mask_crs.to_string()
+    else:
+        # allow already-string / rasterio CRS
+        src_crs_str = str(mask_crs)
+
+    dst_crs_str = mosaic_crs.to_string() if hasattr(mosaic_crs, "to_string") else str(mosaic_crs)
+
+    # Reproject mask geometries ONLY if needed
+    if src_crs_str != dst_crs_str:
+        mask_geoms_proj = [
+            transform_geom(src_crs_str, dst_crs_str, g, precision=6)
+            for g in mask_geoms
+        ]
+    else:
+        mask_geoms_proj = mask_geoms
+
     mem_meta = mosaic_meta.copy()
     mem_meta.update({"driver": "GTiff", "crs": mosaic_crs})
 
     with MemoryFile() as memfile:
         with memfile.open(**mem_meta) as ds:
             ds.write(mosaic_array)
-            out_img, out_transform = rio_mask(ds, mask_geoms, crop=True, nodata=ds.nodata)
+
+            # Helpful debug if it still fails
+            # print("DEBUG ds.crs:", ds.crs, "bounds:", ds.bounds)
+
+            out_img, out_transform = rio_mask(
+                ds,
+                mask_geoms_proj,
+                crop=True,
+                nodata=ds.nodata
+            )
 
             out_meta = ds.meta.copy()
             out_meta.update({
@@ -277,14 +294,11 @@ def clip_array_with_geojson(mosaic_array, mosaic_transform, mosaic_meta, mosaic_
 
 
 def reproject_to_crs(src_array, src_meta, dst_crs_str: str, resampling=Resampling.bilinear):
-    """
-    Reproject array+meta to dst_crs, return (dst_array, dst_meta).
-    """
     src_crs = src_meta["crs"]
     dst_crs = CRS.from_user_input(dst_crs_str)
-
     transform, width, height = calculate_default_transform(
-        src_crs, dst_crs, src_meta["width"], src_meta["height"], *rasterio.transform.array_bounds(
+        src_crs, dst_crs, src_meta["width"], src_meta["height"],
+        *rasterio.transform.array_bounds(
             src_meta["height"], src_meta["width"], src_meta["transform"]
         )
     )
@@ -297,10 +311,8 @@ def reproject_to_crs(src_array, src_meta, dst_crs_str: str, resampling=Resamplin
         "height": height
     })
 
-    # Allocate destination
     count = src_meta.get("count", 1)
     dtype = src_meta.get("dtype", "float32")
-
     import numpy as np
     dst_array = np.zeros((count, height, width), dtype=dtype)
 
@@ -314,9 +326,7 @@ def reproject_to_crs(src_array, src_meta, dst_crs_str: str, resampling=Resamplin
             dst_crs=dst_crs,
             resampling=resampling
         )
-
     return dst_array, dst_meta
-
 
 def write_geotiff(out_path: str, array, meta):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -324,7 +334,6 @@ def write_geotiff(out_path: str, array, meta):
     meta2.update({"driver": "GTiff"})
     with rasterio.open(out_path, "w", **meta2) as dst:
         dst.write(array)
-
 
 def zip_outputs(output_paths: list[str], zip_path: str) -> str:
     os.makedirs(os.path.dirname(zip_path), exist_ok=True)
@@ -334,49 +343,56 @@ def zip_outputs(output_paths: list[str], zip_path: str) -> str:
             z.write(p, arcname=arcname)
     return zip_path
 
-
-# -------- Helpers --------
+# -------- upload helpers --------
 def _same_stem(*names: str) -> bool:
-    """Return True if all filenames share the same basename (case-insensitive)."""
     stems = [os.path.splitext(n)[0].lower() for n in names]
     return len(set(stems)) == 1
 
 def _has_ext(filename: str, ext: str) -> bool:
-    """Case-insensitive check for a given extension (without leading dot)."""
     return filename.lower().endswith(f'.{ext}')
 
+# ----------------------------
+# Job helper utilities (NEW)
+# ----------------------------
+def get_job_snapshot(job_id: str) -> dict | None:
+    """Return a shallow copy of a job dict (or None)."""
+    with JOBS_LOCK:
+        j = JOBS.get(job_id)
+        return dict(j) if j else None
+
+def update_job_if_exists(job_id: str, **fields) -> bool:
+    """Update job fields if the job still exists. Returns True if updated."""
+    with JOBS_LOCK:
+        j = JOBS.get(job_id)
+        if not j:
+            return False
+        j.update(fields)
+        return True
+
+def pop_job(job_id: str) -> dict | None:
+    """Remove and return job record (or None)."""
+    with JOBS_LOCK:
+        return JOBS.pop(job_id, None)
 
 # -------- Error handlers --------
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
     return 'File too large. Max size is 20 MB.', 413
 
-
 # -------- Routes --------
 @app.route('/')
 def index():
-    # Default center and zoom; tweak as desired
     return render_template('index.html', center_lat=39.5, center_lng=-98.35, zoom=4)
-
 
 @app.post('/upload_shapefile_parts')
 def upload_shapefile_parts():
-    """
-    Accepts four parts of a shapefile: .shp, .shx, .dbf, .prj
-    Validates shared basename, reads with GeoPandas, reprojects to EPSG:4326,
-    and returns GeoJSON.
-    """
     req = request.files
     missing = [k for k in ('shp', 'shx', 'dbf', 'prj') if k not in req or req[k].filename == '']
     if missing:
         return f"Missing required file(s): {', '.join(missing)}", 400
 
-    shp_f = req['shp']
-    shx_f = req['shx']
-    dbf_f = req['dbf']
-    prj_f = req['prj']
+    shp_f = req['shp']; shx_f = req['shx']; dbf_f = req['dbf']; prj_f = req['prj']
 
-    # Validate extensions
     if not _has_ext(shp_f.filename, 'shp'):
         return 'Expected a .shp file for field "shp"', 400
     if not _has_ext(shx_f.filename, 'shx'):
@@ -386,36 +402,25 @@ def upload_shapefile_parts():
     if not _has_ext(prj_f.filename, 'prj'):
         return 'Expected a .prj file for field "prj"', 400
 
-    # Ensure same basename
     if not _same_stem(shp_f.filename, shx_f.filename, dbf_f.filename, prj_f.filename):
         return 'All four files must share the same basename (e.g., parcels.shp/shx/dbf/prj).', 400
 
-    # Normalize filenames to a unified, safe stem (from the .shp name)
     safe_stem = os.path.splitext(secure_filename(shp_f.filename))[0]
     temp_dir = tempfile.mkdtemp(prefix='shp_parts_')
-
     warnings = []
     try:
-        # Save all four using the same stem
         shp_path = os.path.join(temp_dir, f'{safe_stem}.shp')
         shx_path = os.path.join(temp_dir, f'{safe_stem}.shx')
         dbf_path = os.path.join(temp_dir, f'{safe_stem}.dbf')
         prj_path = os.path.join(temp_dir, f'{safe_stem}.prj')
+        shp_f.save(shp_path); shx_f.save(shx_path); dbf_f.save(dbf_path); prj_f.save(prj_path)
 
-        shp_f.save(shp_path)
-        shx_f.save(shx_path)
-        dbf_f.save(dbf_path)
-        prj_f.save(prj_path)
-
-        # Read with GeoPandas (Fiona will find .shx/.dbf/.prj by stem)
         try:
             gdf = gpd.read_file(shp_path)
         except Exception as read_err:
             return f'Failed to read shapefile: {read_err}', 400
 
-        # Reproject to WGS84 for Leaflet
         if gdf.crs is None:
-            # We have a .prj, but sometimes CRS parsing fails—warn, but continue.
             warnings.append('CRS not detected; proceeding as-is. Data may not align with basemap.')
         else:
             try:
@@ -424,128 +429,192 @@ def upload_shapefile_parts():
                 warnings.append(f'Failed to reproject to EPSG:4326: {crs_err}. Using original coordinates.')
 
         geojson_obj = json.loads(gdf.to_json())
-
-        # Return single layer payload for consistency
-        return jsonify({
-            'layer': {'name': safe_stem, 'geojson': geojson_obj},
-            'warnings': warnings
-        })
+        return jsonify({'layer': {'name': safe_stem, 'geojson': geojson_obj}, 'warnings': warnings})
 
     finally:
-        # Cleanup temp directory regardless of success/failure
         try:
             shutil.rmtree(temp_dir)
         except Exception:
             pass
 
 # ----------------------------
-# Updated Endpoint
+# JOB ENDPOINTS
 # ----------------------------
-@app.post("/download_lidar")
-def download_lidar():
+@app.get("/jobs")
+def list_jobs():
+    with JOBS_LOCK:
+        jobs = list(JOBS.values())
+    jobs_sorted = sorted(jobs, key=lambda j: j.get("created_at", 0), reverse=True)
+    return jsonify({
+        "jobs": [{
+            "job_id": j["job_id"],
+            "job_name": j.get("job_name", ""),
+            "status": j.get("status", "processing"),
+            "error": j.get("error", "")
+        } for j in jobs_sorted]
+    })
+
+@app.get("/jobs/<job_id>")
+def get_job(job_id: str):
+    j = get_job_snapshot(job_id)
+    if not j:
+        abort(404)
+    return jsonify({
+        "job_id": j["job_id"],
+        "job_name": j.get("job_name", ""),
+        "status": j.get("status", "processing"),
+        "error": j.get("error", "")
+    })
+
+@app.post("/jobs/<job_id>/cancel")
+def cancel_job(job_id: str):
     """
-    Receives JSON body with:
-      [uploaded_shapefile_geojson, ranked_dataset_ids, output_crs, stitch_enabled]
-
-    Implements: tile query -> download/extract -> mosaic -> clip -> reproject -> optional stitch.
-    Returns a ZIP containing resulting GeoTIFF(s).
+    Cancel/Delete job:
+    - If processing: signal cancel, attempt to cancel future
+    - Delete workspace and outputs
+    - Remove job record from JOBS so it disappears from /jobs immediately
+    This supports BOTH "Cancel" and "Delete" UX using one endpoint.
     """
-    print("Received request for /download_lidar")  # Debug log
-    data = request.get_json(silent=True) or {}
-    arr = data.get("data")
+    j = get_job_snapshot(job_id)
+    if not j:
+        return jsonify({"status": "error", "message": "Job not found"}), 404
 
-    if not isinstance(arr, list) or len(arr) != 4:
-        return jsonify({
-            "status": "error",
-            "message": "Expected JSON {data: [geojson, datasets, output_crs, stitch]}"
-        }), 400
+    # signal cancel (safe for completed/failed too)
+    ev = j.get("cancel_event")
+    if ev:
+        ev.set()
 
-    uploaded_geojson, ranked_datasets, output_crs, stitch = arr
-    print(f"Parsed input - GeoJSON type: {type(uploaded_geojson)}, Datasets: {ranked_datasets}, Output CRS: {output_crs}, Stitch: {stitch}")  # Debug log
-    # ---- validation (same spirit as your stub) ----
-    if not uploaded_geojson or not isinstance(uploaded_geojson, (dict, list)):
-        return jsonify({"status": "error", "message": "Invalid or missing uploaded GeoJSON."}), 400
-
-    if not isinstance(ranked_datasets, list) or len(ranked_datasets) == 0:
-        return jsonify({"status": "error", "message": "No datasets provided."}), 400
-
-    if not isinstance(output_crs, str) or not output_crs.upper().startswith("EPSG:"):
-        return jsonify({"status": "error", "message": "Output CRS must look like EPSG:####."}), 400
-
+    # attempt to stop future if not started
+    fut = j.get("future")
     try:
-        mask_geoms, input_crs = parse_geojson_geometry(uploaded_geojson)
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"GeoJSON parse error: {e}"}), 400
+        if fut:
+            fut.cancel()
+    except Exception:
+        pass
 
-    # ---- job workspace ----
-    job_id = str(uuid.uuid4())
-    job_dir = os.path.join(BASE_WORK_DIR, f"lidar_job_{job_id}")
+    # delete workspace
+    job_dir = j.get("job_dir")
+    if job_dir and os.path.isdir(job_dir):
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+    # remove from registry so it disappears from /jobs immediately
+    pop_job(job_id)
+
+    return jsonify({"status": "ok", "job_id": job_id})
+
+@app.get("/jobs/<job_id>/download")
+def download_job(job_id: str):
+    j = get_job_snapshot(job_id)
+    if not j:
+        return jsonify({"status": "error", "message": "Job not found"}), 404
+
+    if j.get("status") != "completed":
+        return jsonify({"status": "error", "message": "Job not completed"}), 409
+
+    zip_path = j.get("zip_path")
+    if not zip_path or not os.path.exists(zip_path):
+        return jsonify({"status": "error", "message": "Output not found"}), 404
+
+    job_name = safe_name(j.get("job_name") or "lidar")
+    return send_file(
+        zip_path,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{job_name}_{job_id}.zip"
+    )
+
+# ----------------------------
+# JOB PROCESSOR
+# ----------------------------
+def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs: str, stitch: bool):
+    """
+    Runs in a background thread. Must not return Flask responses.
+    Must tolerate job being deleted while processing (Cancel/Delete).
+    """
+    j = get_job_snapshot(job_id)
+    if not j:
+        return
+
+    cancel_event: threading.Event = j["cancel_event"]
+    job_dir = j["job_dir"]
     downloads_dir = os.path.join(job_dir, "downloads")
     outputs_dir = os.path.join(job_dir, "outputs")
     os.makedirs(downloads_dir, exist_ok=True)
     os.makedirs(outputs_dir, exist_ok=True)
-    print(f"Created job workspace at {job_dir}")  # Debug log
-    try:
-        # Get file extensions for datasets
-        ext_map = get_dataset_ext(ranked_datasets, LIDAR_EXTENTS_FS0)
 
-        produced = []   # per-dataset output tifs
+    def check_cancel_or_deleted():
+        # If user clicked Cancel/Delete, cancel_event is set.
+        if cancel_event.is_set():
+            raise JobCancelled("Job canceled by user.")
+        # If job record is gone, treat as deleted and stop.
+        if not get_job_snapshot(job_id):
+            raise JobCancelled("Job deleted by user.")
+
+    try:
+        check_cancel_or_deleted()
+
+        mask_geoms, input_crs = parse_geojson_geometry(uploaded_geojson)
+
+        check_cancel_or_deleted()
+
+        ext_map = get_dataset_ext(ranked_datasets, LIDAR_EXTENTS_FS0)
+        produced = []
 
         for dataset in ranked_datasets:
+            check_cancel_or_deleted()
             ds_name = safe_name(dataset)
             ds_download_dir = os.path.join(downloads_dir, ds_name)
             os.makedirs(ds_download_dir, exist_ok=True)
 
-            file_ext = ext_map.get(dataset)
-            if not file_ext:
-                # If the service doesn't return an ext, try common fallback
-                file_ext = ".tif"
+            file_ext = ext_map.get(dataset) or ".tif"
 
-            # 1) Tile intersection query
-            tiles = get_intersecting_tiles(mask_geoms, TILE_INDEX_MAPSERVER, dataset, in_wkid=4326)
+            # 1) query intersecting tiles
+            tiles = get_intersecting_tiles(mask_geoms, TILE_INDEX_MAPSERVER, dataset, input_crs)
             if not tiles:
-                return jsonify({
-                    "status": "error",
-                    "message": f"No intersecting tiles found for dataset '{dataset}'."
-                }), 404
-            print(f"Found {len(tiles)} intersecting tiles for dataset '{dataset}'")  # Debug log
-            # 2) Download/extract each tile zip
+                raise RuntimeError(f"No intersecting tiles found for dataset '{dataset}'.")
+
+            # 2) download/extract each tile zip
             for path, tile, ext in tiles:
-                # In your template: ftp_url = os.path.join(PATH, f'{TILE}{EXT}')
+                check_cancel_or_deleted()
                 tile_url = os.path.join(path, f"{tile}{ext}")
-                download_and_extract_zip(tile_url, ds_download_dir)
-            print(f"Downloaded and extracted tiles for dataset '{dataset}' to {ds_download_dir}")  # Debug log
-            # 3) Find extracted rasters
+                download_and_extract_zip(tile_url, ds_download_dir, cancel_event=cancel_event)
+
+            check_cancel_or_deleted()
+
+            # 3) find extracted rasters
             raster_paths = glob(os.path.join(ds_download_dir, f"*{file_ext}"))
             if not raster_paths:
-                # also try tif if ext mismatched
                 raster_paths = glob(os.path.join(ds_download_dir, "*.tif")) + glob(os.path.join(ds_download_dir, "*.tiff"))
-            
             if not raster_paths:
-                return jsonify({
-                    "status": "error",
-                    "message": f"No rasters found after download for dataset '{dataset}'."
-                }), 500
-            print(f"Found {len(raster_paths)} raster files for dataset '{dataset}' after extraction")  # Debug log
-            # 4) Mosaic
+                raise RuntimeError(f"No rasters found after download for dataset '{dataset}'.")
+
+            check_cancel_or_deleted()
+
+            # 4) mosaic
             mosaic_arr, mosaic_transform, mosaic_crs, mosaic_meta = mosaic_rasters_to_array(raster_paths)
-            print(f"Mosaicked rasters for dataset '{dataset}' into array with shape {mosaic_arr.shape} and CRS {mosaic_crs}")  # Debug log
-            # 5) Clip to polygon mask
+
+            check_cancel_or_deleted()
+
+            # 5) clip
             clipped_arr, clipped_transform, clipped_meta = clip_array_with_geojson(
-                mosaic_arr, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms
+                mosaic_arr, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms, input_crs
             )
             clipped_meta.update({"crs": mosaic_crs, "transform": clipped_transform})
-            print(f"Clipped mosaic for dataset '{dataset}' to geometry, resulting in array with shape {clipped_arr.shape}")  # Debug log
-            # 6) Reproject to requested output CRS
+
+            check_cancel_or_deleted()
+
+            # 6) reproject
             reproj_arr, reproj_meta = reproject_to_crs(clipped_arr, clipped_meta, output_crs)
-            print(f"Reprojected clipped raster for dataset '{dataset}' to {output_crs}, resulting in array with shape {reproj_arr.shape} and CRS {reproj_meta['crs']}")  # Debug log
-            # 7) Write dataset output GeoTIFF
+
+            check_cancel_or_deleted()
+
+            # 7) write tif
             out_tif = os.path.join(outputs_dir, f"{ds_name}.tif")
             write_geotiff(out_tif, reproj_arr, reproj_meta)
             produced.append(out_tif)
-            print(f"Wrote output GeoTIFF for dataset '{dataset}' to {out_tif}")  # Debug log
 
-        # Optional stitch across datasets
+        check_cancel_or_deleted()
+
         final_outputs = produced
         if bool(stitch) and len(produced) > 1:
             stitched_arr, stitched_transform, stitched_crs, stitched_meta = mosaic_rasters_to_array(produced)
@@ -553,34 +622,81 @@ def download_lidar():
             stitched_path = os.path.join(outputs_dir, "Stitched_DEMs.tif")
             write_geotiff(stitched_path, stitched_arr, stitched_meta)
             final_outputs = [stitched_path]
-            print(f"Stitched {len(produced)} datasets into single GeoTIFF at {stitched_path}")  # Debug log
-        
-        # Zip and return
+
         zip_path = os.path.join(job_dir, "lidar_outputs.zip")
         zip_outputs(final_outputs, zip_path)
 
-        return send_file(
-            zip_path,
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name=f"lidar_{job_id}.zip"
-        )
+        # Mark completed only if job still exists
+        update_job_if_exists(job_id, status="completed", zip_path=zip_path, error="")
 
-    except requests.HTTPError as e:
-        return jsonify({"status": "error", "message": f"HTTP error: {e}"}), 502
+    except JobCancelled:
+        # Job was canceled or deleted. Ensure files are removed.
+        shutil.rmtree(job_dir, ignore_errors=True)
+        # If job still exists (rare timing), remove it so it disappears from /jobs.
+        pop_job(job_id)
+        return
+
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Processing error: {e}"}), 500
+        # Mark failed only if job still exists; otherwise user already deleted it.
+        update_job_if_exists(job_id, status="failed", zip_path=None, error=str(e))
 
-    finally:
-        # Optional: cleanup job dir after returning
-        # If you want results to persist for later downloads, remove this block.
-        try:
-            shutil.rmtree(job_dir, ignore_errors=True)
-        except Exception:
-            pass
+# ----------------------------
+# Updated: /download_lidar now submits a job
+# ----------------------------
+@app.post("/download_lidar")
+def download_lidar():
+    data = request.get_json(silent=True) or {}
+    arr = data.get("data")
+    job_name = data.get("job_name", "")
 
+    if not isinstance(arr, list) or len(arr) != 4:
+        return jsonify({
+            "status": "error",
+            "message": "Expected JSON {data: [geojson, datasets, output_crs, stitch], job_name: '...'}"
+        }), 400
+
+    uploaded_geojson, ranked_datasets, output_crs, stitch = arr
+
+    if not uploaded_geojson or not isinstance(uploaded_geojson, (dict, list)):
+        return jsonify({"status": "error", "message": "Invalid or missing uploaded GeoJSON."}), 400
+    if not isinstance(ranked_datasets, list) or len(ranked_datasets) == 0:
+        return jsonify({"status": "error", "message": "No datasets provided."}), 400
+    if not isinstance(output_crs, str) or not output_crs.upper().startswith("EPSG:"):
+        return jsonify({"status": "error", "message": "Output CRS must look like EPSG:####."}), 400
+
+    # Create job
+    job_id = str(uuid.uuid4())
+    job_dir = os.path.join(BASE_WORK_DIR, f"lidar_job_{job_id}")
+    cancel_event = threading.Event()
+
+    job_record = {
+        "job_id": job_id,
+        "job_name": str(job_name or "").strip(),
+        "status": "processing",
+        "created_at": now_epoch(),
+        "job_dir": job_dir,
+        "zip_path": None,
+        "error": "",
+        "cancel_event": cancel_event,
+        "future": None
+    }
+
+    with JOBS_LOCK:
+        JOBS[job_id] = job_record
+
+    # Submit background work
+    future = EXECUTOR.submit(process_lidar_job, job_id, uploaded_geojson, ranked_datasets, output_crs, bool(stitch))
+    with JOBS_LOCK:
+        if job_id in JOBS:
+            JOBS[job_id]["future"] = future
+
+    return jsonify({
+        "status": "accepted",
+        "job_id": job_id,
+        "job_name": job_record["job_name"],
+        "message": "Job submitted and processing started."
+    }), 202
 
 # --- Dev server ---
 if __name__ == '__main__':
-    # For local development only; use a proper WSGI server in production
     app.run(host='0.0.0.0', port=5001, debug=True)
