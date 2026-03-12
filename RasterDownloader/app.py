@@ -595,22 +595,39 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
 
             check_cancel_or_deleted()
 
-            # 5) clip
-            clipped_arr, clipped_transform, clipped_meta = clip_array_with_geojson(
-                mosaic_arr, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms, input_crs
-            )
-            clipped_meta.update({"crs": mosaic_crs, "transform": clipped_transform})
+            # 6) reproject
+            reproj_arr, reproj_meta = reproject_to_crs(mosaic_arr, mosaic_meta, output_crs)
 
             check_cancel_or_deleted()
 
-            # 6) reproject
-            reproj_arr, reproj_meta = reproject_to_crs(clipped_arr, clipped_meta, output_crs)
+            mask_geoms_out = [
+                transform_geom(
+                    input_crs.to_string(),
+                    reproj_meta["crs"].to_string(),
+                    g,
+                    precision=6
+                )
+                for g in mask_geoms
+            ]
+
+            # 5) clip
+            
+            clipped_arr, clipped_transform, clipped_meta = clip_array_with_geojson(
+                reproj_arr,
+                reproj_meta["transform"],
+                reproj_meta,
+                reproj_meta["crs"],
+                mask_geoms_out,
+                reproj_meta["crs"]
+            )
+
+            clipped_meta.update({"crs": mosaic_crs, "transform": clipped_transform})
 
             check_cancel_or_deleted()
 
             # 7) write tif
             out_tif = os.path.join(outputs_dir, f"{ds_name}.tif")
-            write_geotiff(out_tif, reproj_arr, reproj_meta)
+            write_geotiff(out_tif, clipped_arr, clipped_meta)
             produced.append(out_tif)
 
         check_cancel_or_deleted()
