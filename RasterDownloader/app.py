@@ -225,7 +225,7 @@ def get_intersecting_tiles(
 def mosaic_rasters_to_array(raster_paths: list[str]):
     srcs = [rasterio.open(p) for p in raster_paths]
     try:
-        mosaic, transform = rio_merge(srcs)
+        mosaic, transform = rio_merge(srcs, nodata=-9999.0)
         meta = srcs[0].meta.copy()
         meta.update({
             "height": mosaic.shape[1],
@@ -592,7 +592,8 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
 
             # 4) mosaic
             mosaic_arr, mosaic_transform, mosaic_crs, mosaic_meta = mosaic_rasters_to_array(raster_paths)
-
+            print(f"Dataset '{dataset}': mosaicked {len(raster_paths)} rasters into array with shape {mosaic_arr.shape} and CRS {mosaic_crs}")
+            print(f"Sample raster value at center: {mosaic_arr[:, mosaic_arr.shape[1]//2, mosaic_arr.shape[2]//2]}")
             check_cancel_or_deleted()
 
             # 6) reproject
