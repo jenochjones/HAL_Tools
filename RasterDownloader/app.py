@@ -621,7 +621,7 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
                 reproj_meta["crs"]
             )
 
-            clipped_meta.update({"crs": mosaic_crs, "transform": clipped_transform})
+            # clipped_meta.update({"crs": mosaic_crs, "transform": clipped_transform})
 
             check_cancel_or_deleted()
 
