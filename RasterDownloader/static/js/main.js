@@ -643,3 +643,16 @@ document.getElementById('btn-download-lidar')?.addEventListener('click', async (
     if (btn) { btn.disabled = false; btn.textContent = 'Download LiDAR'; }
   }
 });
+
+const select = document.getElementById('out-crs-select');
+const input = document.getElementById('out-crs');
+
+// When user selects from dropdown → update input
+select.addEventListener('change', () => {
+  input.value = select.value.replace("EPSG:", "");
+});
+
+// When user types manually → clear dropdown selection
+input.addEventListener('input', () => {
+  select.selectedIndex = 0;
+});

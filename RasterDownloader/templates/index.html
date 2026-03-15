@@ -20,20 +20,41 @@
       <nav class="menu">
         <button class="menu-btn" id="btn-load-shp-4">Load Shapefile (.shp, .shx, .dbf, .prj)</button>
 
-        <!--<button class="menu-btn" id="btn-draw-aoi">Draw AOI Polygon</button>
-        <button class="menu-btn" id="btn-clear-aoi">Clear AOI</button>-->
-
         <div id="dataset-list"></div>
 
         <!-- NEW: Job name input -->
         <div class="row">
           <label for="job-name">Job Name:</label>
-          <input id="job-name" class="menu-inpt" placeholder="e.g., Mapleton AOI - March 2026">
+          <input id="job-name" class="menu-inpt" placeholder="e.g., Job 1">
         </div>
 
+        <label for="out-crs">Output CRS:</label>
         <div class="row">
-          <label for="out-crs">Output CRS:</label>
-          <input id="out-crs" class="menu-inpt" placeholder="EPSG Number">
+          <select id="out-crs-select" class="menu-inpt-full">
+            <option value="" disabled selected>Select CRS</option>
+
+            <!-- Utah Statewide -->
+            <option value="EPSG:26912">NAD83 / UTM zone 12N (EPSG:26912)</option>
+            <option value="EPSG:26913">NAD83 / UTM zone 13N (EPSG:26913)</option>
+
+            <!-- Utah State Plane (NAD83) -->
+            <option value="EPSG:32142">NAD83 / Utah North (EPSG:32142)</option>
+            <option value="EPSG:32143">NAD83 / Utah Central (EPSG:32143)</option>
+            <option value="EPSG:32144">NAD83 / Utah South (EPSG:32144)</option>
+
+            <!-- Utah State Plane (NAD83 HARN) -->
+            <option value="EPSG:3560">NAD83 / Utah North (ftUS) (EPSG:3560)</option>
+            <option value="EPSG:3566">NAD83 / Utah Central (ftUS) (EPSG:3566)</option>
+            <option value="EPSG:3567">NAD83 / Utah South (ftUS) (EPSG:3567)</option>
+
+            <!-- Utah State Plane (NAD83 2011) -->
+            <option value="EPSG:6626">NAD83(2011) / Utah North (ftUS) (EPSG:6626)</option>
+            <option value="EPSG:6625">NAD83(2011) / Utah Central (ftUS) (EPSG:6625)</option>
+            <option value="EPSG:6627">NAD83(2011) / Utah South (ftUS) (EPSG:6627)</option>
+          </select>
+        </div>
+        <div class="row">
+          <input id="out-crs" class="menu-inpt-full" placeholder="or Type EPSG Number">
         </div>
 
         <div class="row">

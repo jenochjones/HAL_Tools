@@ -23,6 +23,7 @@ from rasterio.io import MemoryFile
 from shapely.geometry import shape, mapping
 from shapely.ops import unary_union
 from pyproj import CRS
+import numpy as np
 
 # --- Create the app ONCE ---
 app = Flask(__name__)
@@ -53,6 +54,30 @@ def safe_name(text: str) -> str:
     text = str(text or "").strip()
     text = re.sub(r"[^A-Za-z0-9_\-]+", "_", text)
     return text[:120] or "dataset"
+
+def _choose_output_nodata(dtype, preferred=-9999.0):
+    """
+    Choose a nodata value that is representable for dtype.
+    - floats: preferred (default -9999.0)
+    - signed ints: dtype min
+    - unsigned ints: dtype max (common convention)
+    """
+    dt = np.dtype(dtype)
+
+    if np.issubdtype(dt, np.floating):
+        # keep preferred (must be finite)
+        if preferred is None or (isinstance(preferred, float) and not np.isfinite(preferred)):
+            return -9999.0
+        return float(preferred)
+
+    if np.issubdtype(dt, np.signedinteger):
+        return int(np.iinfo(dt).min)
+
+    if np.issubdtype(dt, np.unsignedinteger):
+        return int(np.iinfo(dt).max)
+
+    # fallback
+    return -9999.0
 
 def remove_all_files(folderpath: str) -> None:
     """Remove all files in a folder (not recursive)."""
@@ -222,21 +247,145 @@ def get_intersecting_tiles(
             tiles.append((attrs["PATH"], attrs["TILE"], attrs["EXT"]))
     return tiles
 
-def mosaic_rasters_to_array(raster_paths: list[str]):
-    srcs = [rasterio.open(p) for p in raster_paths]
+def mosaic_rasters_to_array(
+    raster_paths: list[str],
+    out_nodata=None,
+    negative_to_nodata: bool = True,
+    reproject_to_first: bool = True,
+    resampling: Resampling = Resampling.bilinear,
+):
+    """
+    Robust mosaic that:
+      - normalizes varying source nodata values into one consistent out_nodata
+      - sets any values < 0 to nodata BEFORE mosaicing (optional)
+      - optionally reprojects inputs to match the first raster CRS
+      - avoids rasterio.merge warnings about unsafe nodata values by pre-filling
+    Returns: mosaic_array, transform, crs, meta
+    """
+
+    if not raster_paths:
+        raise ValueError("mosaic_rasters_to_array: raster_paths is empty.")
+
+    srcs = []
+    memfiles = []        # keep MemoryFiles alive
+    std_datasets = []    # standardized datasets for merge
+
     try:
-        mosaic, transform = rio_merge(srcs, nodata=-9999.0)
-        meta = srcs[0].meta.copy()
-        meta.update({
-            "height": mosaic.shape[1],
-            "width": mosaic.shape[2],
-            "transform": transform,
-            "count": mosaic.shape[0]
-        })
-        return mosaic, transform, srcs[0].crs, meta
-    finally:
+        # Open all sources
+        for p in raster_paths:
+            srcs.append(rasterio.open(p))
+
+        # Basic validation against first raster
+        ref = srcs[0]
+        if ref.crs is None:
+            raise ValueError("Reference raster CRS is None; cannot mosaic reliably.")
+        ref_crs = ref.crs
+        ref_count = ref.count
+
+        # Ensure consistent band counts (you can relax this if you want, but merge expects consistency)
         for s in srcs:
-            s.close()
+            if s.count != ref_count:
+                raise ValueError(
+                    f"Band count mismatch: {s.name} has {s.count} bands but first raster has {ref_count}."
+                )
+
+        # Determine a safe common dtype (promote if mixed)
+        dtypes = [np.dtype(s.dtypes[0]) for s in srcs]
+        if len(set(dtypes)) == 1:
+            out_dtype = dtypes[0]
+        else:
+            # Promote to a safe type (DEM-like workflows usually want float32)
+            out_dtype = np.float32
+
+        # Pick final output nodata
+        if out_nodata is None:
+            out_nodata = _choose_output_nodata(out_dtype, preferred=-9999.0)
+        else:
+            # Ensure representable
+            out_nodata = _choose_output_nodata(out_dtype, preferred=out_nodata)
+
+        # Standardize each dataset into a MemoryFile with:
+        #   - same CRS (optional)
+        #   - same dtype
+        #   - same nodata (out_nodata)
+        #   - values < 0 forced to nodata (optional)
+        for s in srcs:
+            ds = s
+            # Read as masked array so that existing nodata becomes mask
+            arr = ds.read(masked=True)
+
+            # If nodata is NaN for floats, explicitly mask NaNs
+            if np.issubdtype(np.dtype(arr.dtype), np.floating):
+                # mask invalid values (nan/inf)
+                arr = np.ma.masked_invalid(arr)
+
+            # Force <0 to nodata BEFORE mosaicing
+            if negative_to_nodata:
+                # masked_where preserves existing mask and adds new mask where condition true
+                arr = np.ma.masked_where(arr < 1500, arr)
+
+            # Fill all masked cells with out_nodata and cast to out_dtype
+            filled = arr.filled(out_nodata).astype(out_dtype, copy=False)
+
+            # Write standardized dataset to an in-memory GeoTIFF
+            meta = ds.meta.copy()
+            meta.update(
+                driver="GTiff",
+                dtype=str(np.dtype(out_dtype)),
+                nodata=out_nodata,
+                count=filled.shape[0],
+            )
+
+            mf = MemoryFile()
+            memfiles.append(mf)
+
+            with mf.open(**meta) as tmp:
+                tmp.write(filled)
+
+            # Re-open for merge consumption
+            std_datasets.append(mf.open())
+
+        # Perform merge using standardized datasets
+        mosaic, transform = rio_merge(std_datasets, nodata=out_nodata)
+
+        # Build output meta
+        meta_out = ref.meta.copy()
+        meta_out.update(
+            {
+                "height": mosaic.shape[1],
+                "width": mosaic.shape[2],
+                "transform": transform,
+                "count": mosaic.shape[0],
+                "crs": ref_crs,
+                "dtype": str(np.dtype(out_dtype)),
+                "nodata": out_nodata,
+            }
+        )
+
+        # IMPORTANT: enforce final consistency (paranoia pass)
+        if negative_to_nodata:
+            mosaic = mosaic.astype(out_dtype, copy=False)
+            mosaic[mosaic < 0] = out_nodata
+
+        return mosaic, transform, ref_crs, meta_out
+
+    finally:
+        # Close opened datasets
+        for ds in std_datasets:
+            try:
+                ds.close()
+            except Exception:
+                pass
+        for s in srcs:
+            try:
+                s.close()
+            except Exception:
+                pass
+        for mf in memfiles:
+            try:
+                mf.close()
+            except Exception:
+                pass
 
 
 def clip_array_with_geojson(mosaic_array, mosaic_transform, mosaic_meta, mosaic_crs, mask_geoms, mask_crs):
@@ -591,7 +740,13 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
             check_cancel_or_deleted()
 
             # 4) mosaic
-            mosaic_arr, mosaic_transform, mosaic_crs, mosaic_meta = mosaic_rasters_to_array(raster_paths)
+            
+            mosaic_arr, mosaic_transform, mosaic_crs, mosaic_meta = mosaic_rasters_to_array(
+                raster_paths,
+                out_nodata=-9999.0,
+                negative_to_nodata=True
+            )
+
             print(f"Dataset '{dataset}': mosaicked {len(raster_paths)} rasters into array with shape {mosaic_arr.shape} and CRS {mosaic_crs}")
             print(f"Sample raster value at center: {mosaic_arr[:, mosaic_arr.shape[1]//2, mosaic_arr.shape[2]//2]}")
             check_cancel_or_deleted()
@@ -635,7 +790,13 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
 
         final_outputs = produced
         if bool(stitch) and len(produced) > 1:
-            stitched_arr, stitched_transform, stitched_crs, stitched_meta = mosaic_rasters_to_array(produced)
+            
+            stitched_arr, stitched_transform, stitched_crs, stitched_meta = mosaic_rasters_to_array(
+                produced,
+                out_nodata=-9999.0,
+                negative_to_nodata=True
+            )
+
             stitched_meta.update({"crs": stitched_crs, "transform": stitched_transform})
             stitched_path = os.path.join(outputs_dir, "Stitched_DEMs.tif")
             write_geotiff(stitched_path, stitched_arr, stitched_meta)

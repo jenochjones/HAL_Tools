@@ -70,6 +70,15 @@ html, body {
   border-radius: 8px;
 }
 
+.menu-inpt-full {
+  width: 100%;
+  padding: 8px 12px;
+  background: #1f2937;
+  color: #e5e7eb;
+  border: 1px solid #374151;
+  border-radius: 8px;
+}
+
 .footer {
   margin-top: auto;
   opacity: 0.7;
