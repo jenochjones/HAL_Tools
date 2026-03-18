@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UGRC Raster Data Download</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+
+<body>
+  <div id="app">
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar">
+      <div class="brand">Toolbar</div>
+
+      <nav class="menu">
+        <button class="menu-btn" id="btn-load-dss">Load DSS File</button>
+        <button class="menu-btn" id="btn-load-csv">Load CSV Mapping File</button>
+        <button class="menu-btn" id="btn-load-geometry">Load Geometry File</button>
+        
+      </nav>
+
+      <input type="file" id="dss-input" accept=".dss" multiple style="display:none" />
+      <input type="file" id="geometry-input" accept=".basin" multiple style="display:none" />
+
+      <div class="footer">
+        <small>© {{ 2026 }} HAL Engineers</small>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="content">
+      <div id="map"></div>
+    </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+  <script>
+    const MAP_CENTER = [{{ center_lat }}, {{ center_lng }}];
+    const MAP_ZOOM = {{ zoom }};
+  </script>
+
+  <script src="{{ url_for('static', filename='js/main.js') }}" type="module"></script>
+</body>
+
+</html>
