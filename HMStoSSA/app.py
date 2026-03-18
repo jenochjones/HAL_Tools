@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, render_template
 import pandas as pd
 import numpy as np
 import geopandas as gpd
@@ -6,9 +6,16 @@ from shapely.geometry import LineString
 import os
 import re
 import tempfile
-from pydsstools.heclib.dss import HecDss
+from hecdss import HecDss
 
 app = Flask(__name__)
+
+# -----------------------------
+# Index Route
+# -----------------------------
+@app.route('/')
+def index():
+    return render_template('index.html', center_lat=39.5, center_lng=-98.35, zoom=4)
 
 # -----------------------------
 # Formatting Functions
@@ -101,9 +108,16 @@ def create_shapefile(shp_input_filepath, inp_string, mapping_df, output_dir):
         coord_id = row['SSA Manhole-ID']
 
         watershed = gdf[gdf['name'] == shp_id]
+        if watershed.empty:
+            continue
+
         centroid = watershed.geometry.centroid.iloc[0]
 
-        node = coords_df[coords_df['Node'] == coord_id].iloc[0]
+        node_row = coords_df[coords_df['Node'] == coord_id]
+        if node_row.empty:
+            continue
+
+        node = node_row.iloc[0]
 
         line = LineString([
             (centroid.x, centroid.y),
@@ -131,7 +145,7 @@ def process_files():
         dss_file = request.files['dss']
         csv_file = request.files['csv']
         inp_file = request.files['inp']
-        shp_file = request.files.get('shp')  # optional
+        shp_file = request.files.get('shp')
         selected_run = request.form.get('run_name')
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,11 +162,13 @@ def process_files():
                 shp_path = os.path.join(tmpdir, shp_file.filename)
                 shp_file.save(shp_path)
 
+            # -----------------------------
             # Load DSS
-            fid = HecDss.Open(dss_path)
+            # -----------------------------
+            fid = HecDss(dss_path)
             mapping = pd.read_csv(csv_path)
 
-            pathname_list = fid.getPathnameDict()['TS']
+            pathname_list = fid.getPathnameList()
 
             # If run not provided, return options
             if not selected_run:
@@ -178,27 +194,45 @@ def process_files():
                     ]
 
                     for p in paths:
-                        ts = fid.read_ts(p)
-                        times = np.array(ts.pytimes)
-                        values = ts.values
+                        try:
+                            record = fid.read(p)
 
-                        mask = ~ts.nodata
-                        df = pd.DataFrame({
-                            'Time': pd.to_datetime(times[mask]),
-                            hms_id: values[mask]
-                        }).set_index('Time')
+                            if record is None or record.values is None:
+                                continue
 
-                        composite_list.append(df)
+                            values = np.array(record.values, dtype=float)
+
+                            # Handle DSS missing values
+                            values = np.where(values <= -900, np.nan, values)
+
+                            times = pd.to_datetime(record.times)
+
+                            df = pd.DataFrame({
+                                'Time': times,
+                                hms_id: values
+                            }).set_index('Time')
+
+                            composite_list.append(df)
+
+                        except Exception as e:
+                            print(f"Error reading {p}: {e}")
+                            continue
 
                 if composite_list:
                     combined = pd.concat(composite_list, axis=1)
-                    summed = combined.sum(axis=1).to_frame(name=f'{ssa_id}_ts')
+                    summed = combined.sum(axis=1, skipna=True).to_frame(name=f'{ssa_id}_ts')
                     df_list.append(summed)
+
+            if not df_list:
+                fid.close()
+                return jsonify({"error": "No time series data found"}), 400
 
             final_df = pd.concat(df_list, axis=1)
             fid.close()
 
+            # -----------------------------
             # Update INP
+            # -----------------------------
             updated_inp_path, inp_str = replace_timeseries_in_inp(
                 inp_path, final_df, unique_ssa_ids
             )
@@ -228,5 +262,8 @@ def download_file():
     return send_file(path, as_attachment=True)
 
 
+# -----------------------------
+# Run App
+# -----------------------------
 if __name__ == '__main__':
     app.run(debug=True)

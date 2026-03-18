@@ -4,28 +4,46 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UGRC Raster Data Download</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <title>HMS → SWMM Converter</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
 </head>
 
 <body>
   <div id="app">
+
     <!-- LEFT SIDEBAR -->
     <aside class="sidebar">
-      <div class="brand">Toolbar</div>
+      <div class="brand">HMS → SWMM</div>
 
       <nav class="menu">
-        <button class="menu-btn" id="btn-load-dss">Load DSS File</button>
-        <button class="menu-btn" id="btn-load-csv">Load CSV Mapping File</button>
-        <button class="menu-btn" id="btn-load-geometry">Load Geometry File</button>
-        
+
+        <!-- Upload Buttons -->
+        <button class="menu-btn" id="btn-load-dss">Upload DSS File</button>
+        <button class="menu-btn" id="btn-load-csv">Upload CSV Mapping</button>
+        <button class="menu-btn" id="btn-load-inp">Upload SWMM INP</button>
+        <button class="menu-btn" id="btn-load-geometry">Upload HMS Geometry</button>
+
+        <hr>
+
+        <!-- Actions -->
+        <button class="menu-btn primary" id="runBtn">Run Conversion</button>
+        <button class="menu-btn" id="downloadBtn">Download Updated INP</button>
+
       </nav>
 
-      <input type="file" id="dss-input" accept=".dss" multiple style="display:none" />
-      <input type="file" id="geometry-input" accept=".basin" multiple style="display:none" />
+      <!-- Hidden File Inputs -->
+      <input type="file" id="dssFile" accept=".dss" style="display:none" />
+      <input type="file" id="csvFile" accept=".csv" style="display:none" />
+      <input type="file" id="inpFile" accept=".inp" style="display:none" />
+      <input type="file" id="hmsGeomFile" accept=".basin,.geo,.txt" style="display:none" />
+
+      <!-- Status -->
+      <div class="status">
+        <p id="status-text">No files loaded</p>
+      </div>
 
       <div class="footer">
         <small>© {{ 2026 }} HAL Engineers</small>
@@ -37,16 +55,58 @@
       <div id="map"></div>
     </main>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
   <script>
     const MAP_CENTER = [{{ center_lat }}, {{ center_lng }}];
     const MAP_ZOOM = {{ zoom }};
+
+    // -----------------------------
+    // Button → File Input Wiring
+    // -----------------------------
+    document.getElementById('btn-load-dss').onclick = () =>
+      document.getElementById('dssFile').click();
+
+    document.getElementById('btn-load-csv').onclick = () =>
+      document.getElementById('csvFile').click();
+
+    document.getElementById('btn-load-inp').onclick = () =>
+      document.getElementById('inpFile').click();
+
+    document.getElementById('btn-load-geometry').onclick = () =>
+      document.getElementById('hmsGeomFile').click();
+
+    // -----------------------------
+    // Status Updates
+    // -----------------------------
+    const statusText = document.getElementById('status-text');
+
+    function updateStatus() {
+      const dss = document.getElementById('dssFile').files[0];
+      const csv = document.getElementById('csvFile').files[0];
+      const inp = document.getElementById('inpFile').files[0];
+      const geo = document.getElementById('hmsGeomFile').files[0];
+
+      statusText.innerHTML = `
+        DSS: ${dss ? dss.name : '❌'}<br>
+        CSV: ${csv ? csv.name : '❌'}<br>
+        INP: ${inp ? inp.name : '❌'}<br>
+        HMS: ${geo ? geo.name : '❌'}
+      `;
+    }
+
+    document.getElementById('dssFile').onchange = updateStatus;
+    document.getElementById('csvFile').onchange = updateStatus;
+    document.getElementById('inpFile').onchange = updateStatus;
+    document.getElementById('hmsGeomFile').onchange = updateStatus;
+
   </script>
 
   <script src="{{ url_for('static', filename='js/main.js') }}" type="module"></script>
-</body>
 
+</body>
 </html>
