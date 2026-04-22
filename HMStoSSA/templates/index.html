@@ -1,112 +1,38 @@
-<!doctype html>
-<html lang="en">
+{% extends "base.html" %}
+{% block content %}
+<h2>HEC Geometry + DSS→INP Converter</h2>
 
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HMS → SWMM Converter</title>
+<div class="card">
+  <h3>1) Upload files</h3>
+  <form action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="form-grid">
 
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
-</head>
+    <label>HEC Geometry file <span class="req">(required)</span></label>
+    <input type="file" name="geom_file" accept=".basin,.geo,.g01,.g02,.g03,.g04,.g05,.g06,.g07,.g08,.g09,.g10,.txt" required>
 
-<body>
-  <div id="app">
+    <label>SWMM INP file (optional, enables INP nodes on map)</label>
+    <input type="file" name="inp_file" accept=".inp">
 
-    <!-- LEFT SIDEBAR -->
-    <aside class="sidebar">
-      <div class="brand">HMS → SWMM</div>
+    <label>Mapping CSV (optional, enables link lines between geometry and INP nodes)</label>
+    <input type="file" name="csv_file" accept=".csv">
 
-      <nav class="menu">
+    <label>HEC-DSS file (optional, enables DSS→INP conversion)</label>
+    <input type="file" name="dss_file" accept=".dss" {% if not dss_available %}disabled{% endif %}>
 
-        <!-- Upload Buttons -->
-        <button class="menu-btn" id="btn-load-dss">Upload DSS File</button>
-        <button class="menu-btn" id="btn-load-csv">Upload CSV Mapping</button>
-        <button class="menu-btn" id="btn-load-inp">Upload SWMM INP</button>
-        <button class="menu-btn" id="btn-load-geometry">Upload HMS Geometry</button>
+    {% if not dss_available %}
+      <div class="notice warn">DSS conversion is disabled because <code>pydsstools</code> / HEC-DSS libraries are not available in this runtime. You can still visualize geometry + INP on the map.</div>
+    {% endif %}
 
-        <hr>
+    <div></div>
+    <button type="submit" class="btn primary">Continue</button>
+  </form>
+</div>
 
-        <!-- Actions -->
-        <button class="menu-btn primary" id="runBtn">Run Conversion</button>
-        <button class="menu-btn" id="downloadBtn">Download Updated INP</button>
-
-      </nav>
-
-      <!-- Hidden File Inputs -->
-      <input type="file" id="dssFile" accept=".dss" style="display:none" />
-      <input type="file" id="csvFile" accept=".csv" style="display:none" />
-      <input type="file" id="inpFile" accept=".inp" style="display:none" />
-      <input type="file" id="hmsGeomFile" accept=".basin,.geo,.txt" style="display:none" />
-
-      <!-- Status -->
-      <div class="status">
-        <p id="status-text">No files loaded</p>
-      </div>
-
-      <div class="footer">
-        <small>© {{ 2026 }} HAL Engineers</small>
-      </div>
-    </aside>
-
-    <!-- MAIN CONTENT -->
-    <main class="content">
-      <div id="map"></div>
-    </main>
-
-  </div>
-
-  <!-- Scripts -->
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
-
-  <script>
-    const MAP_CENTER = [{{ center_lat }}, {{ center_lng }}];
-    const MAP_ZOOM = {{ zoom }};
-
-    // -----------------------------
-    // Button → File Input Wiring
-    // -----------------------------
-    document.getElementById('btn-load-dss').onclick = () =>
-      document.getElementById('dssFile').click();
-
-    document.getElementById('btn-load-csv').onclick = () =>
-      document.getElementById('csvFile').click();
-
-    document.getElementById('btn-load-inp').onclick = () =>
-      document.getElementById('inpFile').click();
-
-    document.getElementById('btn-load-geometry').onclick = () =>
-      document.getElementById('hmsGeomFile').click();
-
-    // -----------------------------
-    // Status Updates
-    // -----------------------------
-    const statusText = document.getElementById('status-text');
-
-    function updateStatus() {
-      const dss = document.getElementById('dssFile').files[0];
-      const csv = document.getElementById('csvFile').files[0];
-      const inp = document.getElementById('inpFile').files[0];
-      const geo = document.getElementById('hmsGeomFile').files[0];
-
-      statusText.innerHTML = `
-        DSS: ${dss ? dss.name : '❌'}<br>
-        CSV: ${csv ? csv.name : '❌'}<br>
-        INP: ${inp ? inp.name : '❌'}<br>
-        HMS: ${geo ? geo.name : '❌'}
-      `;
-    }
-
-    document.getElementById('dssFile').onchange = updateStatus;
-    document.getElementById('csvFile').onchange = updateStatus;
-    document.getElementById('inpFile').onchange = updateStatus;
-    document.getElementById('hmsGeomFile').onchange = updateStatus;
-
-  </script>
-
-  <script src="{{ url_for('static', filename='js/main.js') }}" type="module"></script>
-
-</body>
-</html>
+<div class="card">
+  <h3>Supported geometry formats</h3>
+  <ul>
+    <li><strong>HEC-RAS</strong> geometry files (commonly <code>.g01</code>, <code>.g02</code>, …) that contain <code>Junct Name=</code> and <code>Reach XY=</code> blocks.</li>
+    <li><strong>HEC-HMS</strong> basin/geometry text files (commonly <code>.basin</code>) that include <code>Canvas X:</code> and <code>Canvas Y:</code> attributes for elements.</li>
+  </ul>
+  <p class="small">If your file uses a different structure, the app will still display the raw contents and try best-effort parsing, but junction/pipe extraction may be limited.</p>
+</div>
+{% endblock %}

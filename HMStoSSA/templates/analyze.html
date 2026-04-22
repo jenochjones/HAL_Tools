@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>2) Choose options</h2>
+
+<div class="card">
+  <h3>Session</h3>
+  <div class="small"><code>{{ token }}</code></div>
+</div>
+
+<form action="{{ url_for('process') }}" method="post" class="card">
+  <input type="hidden" name="token" value="{{ token }}">
+
+  <h3>Mapping</h3>
+  {% if has_csv and has_inp %}
+    <p class="small">Pick the CSV columns used to map <strong>Geometry element name</strong> (HMS/RAS junction id) to <strong>INP node id</strong> (SSA/manhole id). These are used to draw link lines.</p>
+    <div class="form-grid">
+      <label>CSV column for INP Node (SSA)</label>
+      <select name="ssa_col" required>
+        {% for c in csv_columns %}
+          <option value="{{ c }}" {% if c.lower() == 'ssa manhole-id'|lower %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+
+      <label>CSV column for Geometry Element (HMS)</label>
+      <select name="hms_col" required>
+        {% for c in csv_columns %}
+          <option value="{{ c }}" {% if c.lower() == 'hms name'|lower %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  {% else %}
+    <div class="notice">Upload both a CSV and an INP if you want mapping lines between geometry and INP nodes.</div>
+    <input type="hidden" name="ssa_col" value="">
+    <input type="hidden" name="hms_col" value="">
+  {% endif %}
+
+  <h3>DSS → INP conversion</h3>
+  {% if has_dss and has_csv and has_inp %}
+    {% if dss_error %}
+      <div class="notice warn">{{ dss_error }}</div>
+      <input type="hidden" name="do_conversion" value="0">
+    {% else %}
+      <div class="form-grid">
+        <label>Run DSS conversion?</label>
+        <select name="do_conversion">
+          <option value="0" selected>No (map only)</option>
+          <option value="1">Yes (write Updated INP)</option>
+        </select>
+
+        <label>HMS Run (from DSS pathnames)</label>
+        <select name="run_name">
+          <option value="">Auto</option>
+          {% for r in run_names %}
+            <option value="{{ r }}">{{ r }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="notice">Upload DSS + CSV + INP to enable conversion. You can still proceed to view the map.</div>
+    <input type="hidden" name="do_conversion" value="0">
+    <input type="hidden" name="run_name" value="">
+  {% endif %}
+
+  <div class="row-actions">
+    <button type="submit" class="btn primary">Build map</button>
+    <a class="btn" href="{{ url_for('index') }}">Start over</a>
+  </div>
+</form>
+{% endblock %}

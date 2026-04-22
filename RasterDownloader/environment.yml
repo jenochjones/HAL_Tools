@@ -28,8 +28,3 @@ dependencies:
   # Optional but often required by rasterio/geopandas workflows
   - libspatialindex
   - rtree
-
-  # Pip section for anything missing from conda
-  - pip
-  - pip:
-      - gunicorn

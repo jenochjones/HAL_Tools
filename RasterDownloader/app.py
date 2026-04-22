@@ -8,13 +8,15 @@ import zipfile
 import tempfile
 import threading
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 from urllib.parse import urljoin
 import requests
 from flask import Flask, request, render_template, jsonify, send_file, abort
 from werkzeug.utils import secure_filename
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
+from werkzeug.middleware.proxy_fix import ProxyFix
 import rasterio
 from rasterio.merge import merge as rio_merge
 from rasterio.mask import mask as rio_mask
@@ -25,9 +27,26 @@ from shapely.ops import unary_union
 from pyproj import CRS
 import numpy as np
 
+# --- Configure logging ---
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
+logger = logging.getLogger("raster_downloader")
+logger.setLevel(LOG_LEVEL)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 # --- Create the app ONCE ---
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 20 * 1024 * 1024  # 20 MB
+app.config.from_mapping(
+    MAX_CONTENT_LENGTH=20 * 1024 * 1024,  # 20 MB
+    JSON_SORT_KEYS=False,
+)
+USE_PROXYFIX = os.environ.get("USE_PROXYFIX", "false").lower() in ("1", "true", "yes")
+if USE_PROXYFIX:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+app.logger.setLevel(LOG_LEVEL)
 
 # ---- Config ----
 LIDAR_EXTENTS_FS0 = "https://services1.arcgis.com/99lidPhWCzftIe9K/ArcGIS/rest/services/LiDAR_Extents/FeatureServer/0"
@@ -35,13 +54,15 @@ TILE_INDEX_MAPSERVER = "https://services1.arcgis.com/99lidPhWCzftIe9K/arcgis/res
 
 # Where to build temp jobs (use persistent path if you want to keep results)
 BASE_WORK_DIR = os.environ.get("LIDAR_WORKDIR", tempfile.gettempdir())
+os.makedirs(BASE_WORK_DIR, exist_ok=True)
+MAX_WORKER_THREADS = int(os.environ.get("MAX_WORKER_THREADS", "2"))
 
 # ----------------------------
 # JOB SYSTEM
 # ----------------------------
 JOBS = {}          # job_id -> dict
 JOBS_LOCK = threading.Lock()
-EXECUTOR = ThreadPoolExecutor(max_workers=2)
+EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS)
 
 class JobCancelled(Exception):
     pass
@@ -528,6 +549,15 @@ def pop_job(job_id: str) -> dict | None:
 def handle_file_too_large(e):
     return 'File too large. Max size is 20 MB.', 413
 
+@app.errorhandler(Exception)
+def handle_unhandled_exception(e):
+    if isinstance(e, HTTPException):
+        app.logger.warning("HTTP exception: %s", e)
+        return e
+
+    app.logger.exception("Unhandled exception during request handling")
+    return jsonify({"status": "error", "message": "Internal server error"}), 500
+
 # -------- Routes --------
 @app.route('/')
 def index():
@@ -747,8 +777,6 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
                 negative_to_nodata=True
             )
 
-            print(f"Dataset '{dataset}': mosaicked {len(raster_paths)} rasters into array with shape {mosaic_arr.shape} and CRS {mosaic_crs}")
-            print(f"Sample raster value at center: {mosaic_arr[:, mosaic_arr.shape[1]//2, mosaic_arr.shape[2]//2]}")
             check_cancel_or_deleted()
 
             # 6) reproject
@@ -816,6 +844,7 @@ def process_lidar_job(job_id: str, uploaded_geojson, ranked_datasets, output_crs
         return
 
     except Exception as e:
+        logger.exception("Job %s failed", job_id)
         # Mark failed only if job still exists; otherwise user already deleted it.
         update_job_if_exists(job_id, status="failed", zip_path=None, error=str(e))
 
@@ -869,6 +898,8 @@ def download_lidar():
         if job_id in JOBS:
             JOBS[job_id]["future"] = future
 
+    logger.info("Accepted job %s: %s datasets, output CRS %s", job_id, len(ranked_datasets), output_crs)
+
     return jsonify({
         "status": "accepted",
         "job_id": job_id,
@@ -876,6 +907,13 @@ def download_lidar():
         "message": "Job submitted and processing started."
     }), 202
 
-# --- Dev server ---
+# --- Run server ---
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    host = os.environ.get("FLASK_RUN_HOST", "0.0.0.0")
+    port = int(os.environ.get("FLASK_RUN_PORT", "5001"))
+    debug_mode = os.environ.get("FLASK_DEBUG", "0").lower() in ("1", "true", "yes")
+    logger.info("Starting Flask development server on %s:%s (debug=%s)", host, port, debug_mode)
+    app.run(host=host, port=port, debug=debug_mode, use_reloader=False)
+
+# For production, use a WSGI server such as:
+#   gunicorn -w 4 -b 0.0.0.0:5001 app:app

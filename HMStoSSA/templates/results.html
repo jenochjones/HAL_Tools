@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>3) Results</h2>
+
+<div class="grid-2">
+  <div class="card">
+    <h3>Map</h3>
+    <div id="map" class="map"></div>
+
+    <div class="legend">
+      <div><span class="swatch j"></span>Geometry junctions</div>
+      <div><span class="swatch p"></span>Pipes / reaches</div>
+      <div><span class="swatch i"></span>INP nodes</div>
+      <div><span class="swatch m"></span>Mapping lines</div>
+    </div>
+
+    <div class="small">
+      Parser: <strong>{{ geom_parser }}</strong> &nbsp; | &nbsp; Geometry CRS hint: <strong>{{ geom_crs_hint }}</strong>
+      {% if inp_crs_hint %}&nbsp; | &nbsp; INP CRS hint: <strong>{{ inp_crs_hint }}</strong>{% endif %}
+      &nbsp; | &nbsp; Map mode: <strong>{{ 'CRS.Simple (planar)' if is_planar else 'Geographic (OSM)' }}</strong>
+    </div>
+
+    <div class="row-actions">
+      <a class="btn" href="{{ url_for('download', token=token, filename='junctions.geojson') }}">Download junctions.geojson</a>
+      <a class="btn" href="{{ url_for('download', token=token, filename='pipes.geojson') }}">Download pipes.geojson</a>
+      <a class="btn" href="{{ url_for('download', token=token, filename='mapping_lines.geojson') }}">Download mapping_lines.geojson</a>
+      <a class="btn" href="{{ url_for('download', token=token, filename='inp_nodes.geojson') }}">Download inp_nodes.geojson</a>
+    </div>
+
+    {% if updated_inp_filename %}
+      <div class="notice ok">Updated INP written. <a href="{{ url_for('download', token=token, filename=updated_inp_filename) }}">Download {{ updated_inp_filename }}</a></div>
+    {% endif %}
+
+    {% if conversion_log and conversion_log|length %}
+      <details>
+        <summary>Conversion log</summary>
+        <pre class="code">{% for line in conversion_log %}{{ line }}
+{% endfor %}</pre>
+      </details>
+    {% endif %}
+
+    <details>
+      <summary>Mapping summary</summary>
+      <pre class="code">{{ mapping_summary | tojson(indent=2) }}</pre>
+    </details>
+  </div>
+
+  <div class="card">
+    <h3>Geometry file contents</h3>
+    <p class="small">Raw text is shown below for transparency. If parsing misses elements, you can use this to adjust the parser patterns in <code>parsers.py</code>.</p>
+    <pre class="code prewrap">{{ raw_geom_text }}</pre>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Cleanup</h3>
+  <p class="small">Temporary uploaded and generated files are stored per session token under <code>instance/</code>. Use cleanup when finished.</p>
+  <a class="btn warn" href="{{ url_for('cleanup', token=token) }}">Cleanup session</a>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.__MAPDATA__ = {
+    isPlanar: {{ 'true' if is_planar else 'false' }},
+    junctions: {{ junctions_geojson | safe }},
+    pipes: {{ pipes_geojson | safe }},
+    inp: {{ inp_geojson | safe }},
+    mapping: {{ maplines_geojson | safe }}
+  };
+</script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% endblock %}
